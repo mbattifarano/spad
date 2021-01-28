@@ -1,6 +1,9 @@
 Simultaneous Preference and Demand Learning for Transportation Networks (SPAD)
 ==============================================================================
 
+.. image:: https://travis-ci.com/mbattifarano/spad.svg?token=vzx77hPQNs9ah2CCneKd&branch=main
+    :target: https://travis-ci.com/mbattifarano/spad
+
 A python package for learning heterogeneous traveller preferences and travel
 demand in transportation networks from data.
 
