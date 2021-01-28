@@ -6,9 +6,19 @@ authors = ["Matt Battifarano <matthew.battifarano@gmail.com>"]
 
 [tool.poetry.dependencies]
 python = "^3.8"
+pandas = "^1.2.1"
+Pint = "^0.16.1"
+geopandas = "^0.8.1"
+osmnx = "^1.0.1"
+networkx = "^2.5"
+tensorflow = "^2.4.1"
 
 [tool.poetry.dev-dependencies]
 pytest = "^5.2"
+jupyter = "^1.0.0"
+matplotlib = "^3.3.3"
+contextily = "^1.0.1"
+seaborn = "^0.11.1"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
