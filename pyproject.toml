@@ -12,6 +12,7 @@ geopandas = "^0.8.1"
 osmnx = "^1.0.1"
 networkx = "^2.5"
 tensorflow = "^2.4.1"
+pyproj = "^3.0.0"
 
 [tool.poetry.dev-dependencies]
 pytest = "^5.2"
@@ -19,6 +20,7 @@ jupyter = "^1.0.0"
 matplotlib = "^3.3.3"
 contextily = "^1.0.1"
 seaborn = "^0.11.1"
+pylint = "^2.6.0"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-from uuid import UUID
-from enum import Enum
-from typing import NamedTuple
 import datetime as dt
-import pandas as pd
+from enum import Enum
+from uuid import UUID
+
 import geopandas as gpd
-import osmnx as ox
-import networkx as nx
+import pandas as pd
 
 
 def read_csv(fname: str) -> pd.DataFrame:
+    """Read GPS trajectory data from a csv file"""
     df = pd.read_csv(
         fname,
         index_col=(
@@ -37,6 +36,8 @@ def read_csv(fname: str) -> pd.DataFrame:
 
 
 class Columns(Enum):
+    """Column names and positions in the csv data"""
+
     driver_id = 0
     shift_id = 1
     timestamp = 2
@@ -52,6 +53,8 @@ class Columns(Enum):
 
 
 class Normalizer:
+    """Normalize data within predefined bounds."""
+
     def __init__(self, min: float = 0, max: float = 100, default: float = 0):
         self.min = min
         self.max = max
@@ -78,6 +81,8 @@ class ToInt:
 
 
 class ActivityType(Enum):
+    """Represent the activity types in the GPS trajectory data"""
+
     uncategorized = 1
     unknown = 2
     still = 3
@@ -109,46 +114,3 @@ EPOCH = dt.datetime(1970, 1, 1)
 def from_ms_epoch(ms: int) -> dt.datetime:
     """Convert milliseconds since UNIX epoch to datetime"""
     return EPOCH + dt.timedelta(milliseconds=int(ms))
-
-
-class BoundingBox(NamedTuple):
-    min_lon: float
-    min_lat: float
-    max_lon: float
-    max_lat: float
-
-    @property
-    def north(self) -> float:
-        return self.max_lat
-
-    @property
-    def south(self) -> float:
-        return self.min_lat
-
-    @property
-    def east(self) -> float:
-        return self.max_lon
-
-    @property
-    def west(self) -> float:
-        return self.min_lon
-
-    @staticmethod
-    def from_geodataframe(df: gpd.GeoDataFrame) -> BoundingBox:
-        minx, miny, maxx, maxy = df.geometry.total_bounds
-        return BoundingBox(
-            min_lon=minx,
-            min_lat=miny,
-            max_lon=maxx,
-            max_lat=maxy,
-        )
-
-    def to_osmnx(self) -> nx.MultiDiGraph:
-        return ox.graph_from_bbox(
-            self.north,
-            self.south,
-            self.east,
-            self.west,
-            network_type="drive",
-            truncate_by_edge=True,
-        )
