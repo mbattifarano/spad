@@ -5,10 +5,12 @@ from enum import Enum
 from uuid import UUID
 
 import geopandas as gpd
+import numpy as np
 import pandas as pd
+from toolz import curry, pipe
 
 
-def read_csv(fname: str) -> pd.DataFrame:
+def read_csv(fname: str, gap_threshold: float = 30.0) -> gpd.GeoDataFrame:
     """Read GPS trajectory data from a csv file"""
     df = pd.read_csv(
         fname,
@@ -25,6 +27,12 @@ def read_csv(fname: str) -> pd.DataFrame:
             Columns.activity_confidence.name: Normalizer(),
         },
     ).sort_index()
+    df = pipe(
+        df,
+        add_row_id,
+        compute_dt,
+        compute_segment_ids(gap_threshold)
+    )
     return gpd.GeoDataFrame(
         df,
         geometry=gpd.points_from_xy(
@@ -33,6 +41,49 @@ def read_csv(fname: str) -> pd.DataFrame:
             crs="WGS84"
         )
     )
+
+
+def add_row_id(df: pd.DataFrame) -> pd.DataFrame:
+    """Add a unique integer id column to the dataframe."""
+    df['rowid'] = np.arange(len(df))
+    df.set_index('rowid', append=True, inplace=True)
+    return df
+
+
+def compute_dt(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute ping intervals in seconds for each pair of consecutive gps pings
+
+    Pings are partitioned by driver and shift before dt is computed
+    """
+    df.reset_index(Columns.timestamp.name, inplace=True)
+    df['dt'] = (
+        df.groupby([Columns.driver_id.name, Columns.shift_id.name])
+          .timestamp
+          .diff()
+          .dt
+          .total_seconds()
+    )
+    df.set_index(Columns.timestamp.name, append=True, inplace=True)
+    return df
+
+
+@curry
+def compute_segment_ids(threshold: float, df: pd.DataFrame) -> pd.DataFrame:
+    """Compute the segment ids for each driver and shift
+
+    A segment of a driver's trajectory on a shift is defined as set of
+    consecutive pings that are no more than threshold seconds apart.
+    """
+    df['segment_id'] = (df.groupby([Columns.driver_id.name,
+                                    Columns.shift_id.name])
+                          .dt.apply(_count_gaps(threshold))
+                        )
+    return df
+
+
+@curry
+def _count_gaps(gap_threshold: float, delta_t: pd.Series) -> pd.Series:
+    return (~(delta_t <= gap_threshold)).cumsum()
 
 
 class Columns(Enum):
@@ -70,6 +121,8 @@ class Normalizer:
 
 
 class ToInt:
+    """Convert input data to int returning a default value on failure"""
+
     def __init__(self, default: int):
         self.default = int(default)
 

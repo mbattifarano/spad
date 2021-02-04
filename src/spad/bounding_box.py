@@ -42,14 +42,15 @@ class BoundingBox(NamedTuple):
         return self.min_lon
 
     @staticmethod
-    def from_geodataframe(df: gpd.GeoDataFrame) -> BoundingBox:
+    def from_geodataframe(df: gpd.GeoDataFrame, buffer: float = 0.0) \
+            -> BoundingBox:
         """Create a bounding box for the spatial data in a geodataframe"""
         minx, miny, maxx, maxy = df.geometry.total_bounds
         return BoundingBox(
-            min_lon=minx,
-            min_lat=miny,
-            max_lon=maxx,
-            max_lat=maxy,
+            min_lon=minx - buffer,
+            min_lat=miny - buffer,
+            max_lon=maxx + buffer,
+            max_lat=maxy + buffer,
         )
 
     def to_osmnx(self) -> nx.MultiDiGraph:
