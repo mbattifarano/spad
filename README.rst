@@ -17,6 +17,14 @@ This project uses poetry_ for python packaging and dependency management.
 3. From the top level of this project run, ``poetry install``.
 4. Verify the setup by running the test suite: ``poetry run pytest``.
 
+
+To build the documentation:
+
+1. ``cd docs``
+2. ``make html``
+
+To generate or update the API documentation run, ``sphinx-apidoc -o docs/source src/``
+
 .. _poetry: https://python-poetry.org/
 
 
