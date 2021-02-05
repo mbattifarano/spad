@@ -37,6 +37,8 @@ def test_link_neighborhood(osmnx_road_network, gps_trajectory):
     assert (len(neighborhood.groupby(gps_trajectory.index.names))
             == len(gps_trajectory))
     assert not neighborhood.distance_to_link.isna().any()
+    assert not neighborhood.offset.isna().any()
+    assert 'link_geometry' in neighborhood.columns
     for (id_, u, v, key), row in neighborhood.iterrows():
         loc = row.locations
         pt = gps_trajectory.geometry.loc[id_]
@@ -57,3 +59,33 @@ def test_link_neighborhood(osmnx_road_network, gps_trajectory):
     assert p3.min() >= 0.0
     assert p3.max() <= 1.0
     assert (p2 == p3).all()
+
+
+def test_map_match(osmnx_road_network, random_walk, gps_trajectory):
+    links = ox.graph_to_gdfs(
+        osmnx_road_network,
+        nodes=False,
+        edges=True,
+    )
+    spc = mm.ShortestPathCalculator(osmnx_road_network)
+    path = mm.map_match(links, gps_trajectory, spc,
+                        threshold=10.0, accuracy=1.0, scale=1.0)
+    assert len(path) == len(random_walk)
+    n_correct = 0
+    for expected_link, idx in zip(random_walk, path):
+        actual_link = mm.get_link_key(idx)
+        n_correct += actual_link == expected_link
+    # test that most links are correct
+    assert n_correct / len(path) >= 0.9 or len(path) - n_correct <= 2
+    # test that the true path is likely
+    neighborhood = mm.link_neighborhood(links, gps_trajectory, threshold=10.0)
+    neighborhood['p_emit'] = mm.emission_probabilities(neighborhood, 1.0)
+    weight = mm.HMMEdgeWeight(neighborhood, spc, 1.0)
+    path_cost = sum([weight(u, v, {}) for u, v in zip(path, path[1:])])
+    _walk_idx = [(i,) + link for i, link in enumerate(random_walk)]
+    walk_cost = sum([weight(u, v, {}) for u, v in zip(_walk_idx, _walk_idx[1:])])
+    # path is minimal so walk cost should be at least as large
+    assert path_cost <= walk_cost
+    # but, the walk cost should be within 1% of the minimum
+    assert walk_cost <= path_cost * 1.01
+

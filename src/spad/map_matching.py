@@ -19,6 +19,7 @@ import geopandas as gpd
 import networkx as nx
 import numpy as np
 import pandas as pd
+from toolz import curry
 
 
 class Terminals(Enum):
@@ -126,7 +127,11 @@ class HMMEdgeWeight:
     def __call__(self, u, v, data) -> float:
         u_row = self._get_node_data(u)
         v_row = self._get_node_data(v)
-        return node_cost(v_row) + link_cost(self.spc, u_row, v_row, self.scale)
+        return (
+            node_cost(v_row)
+            + link_cost(self.spc, self.neighborhood.geometry.name,
+                        u_row, v_row, self.scale)
+        )
 
     def _get_node_data(self, u) -> Node:
         return u if is_terminal(u) else self.neighborhood.loc[u]
@@ -137,12 +142,14 @@ def is_terminal(u) -> bool:
 
 
 def link_cost(shortest_path_calculator: ShortestPathCalculator,
+              pt_geom_column: str,
               u: Node, v: Node, scale: float = 1.0):
     if is_terminal(u) or is_terminal(v):
         return 0.0
     else:
         return -np.log(
-            transition_probabilities(shortest_path_calculator, u, v, scale)
+            transition_probabilities(shortest_path_calculator, pt_geom_column,
+                                     u, v, scale)
             + EPS
         )
 
@@ -154,17 +161,12 @@ def node_cost(u: Node):
 def safe_neg_log(value: float) -> float:
     """Returns the negative log of value plus a small constant
 
-    Value must be non-negative. Zero values will return a large positive
-
-    :param value:
-    :type value:
-    :return:
-    :rtype:
+    Value must be non-negative. Zero values will return a large positive number
     """
     return -np.log(value + EPS)
 
 
-def _get_link_key(compound_index: tuple) -> LinkKey:
+def get_link_key(compound_index: tuple) -> LinkKey:
     return compound_index[-LINK_KEY_LEN:]
 
 
@@ -202,12 +204,16 @@ def link_neighborhood(links: gpd.GeoDataFrame, trajectory: gpd.GeoDataFrame,
     neighborhood['distance_to_link'] = neighborhood.distance(
         neighborhood.link_geometry
     )
-    neighborhood['offset'] = neighborhood.apply(_offset_on_link, axis=1)
+    neighborhood['offset'] = neighborhood.apply(
+        _offset_on_link(neighborhood.geometry.name),
+        axis=1
+    )
     return neighborhood
 
 
-def _offset_on_link(row: pd.Series) -> float:
-    return row.link_geometry.project(row.geometry)
+@curry
+def _offset_on_link(pt_geom_column: str, row: pd.Series) -> float:
+    return row.link_geometry.project(row[pt_geom_column])
 
 
 def emission_probabilities(neighborhood: gpd.GeoDataFrame,
@@ -229,6 +235,7 @@ def emission_probabilities(neighborhood: gpd.GeoDataFrame,
 
 
 def transition_probabilities(shortest_path_calculator: ShortestPathCalculator,
+                             pt_geom_column: str,
                              u_row: pd.Series, v_row: pd.Series,
                              scale: float = 1.0) -> float:
     """Compute transition probabilities between successive point-link pairs.
@@ -236,6 +243,8 @@ def transition_probabilities(shortest_path_calculator: ShortestPathCalculator,
     :param shortest_path_calculator: An instance of ShortestPathCalculator for
     the underlying road network
     :type shortest_path_calculator: ShortestPathCalculator
+    :param pt_geom_column: The name of the geometry column of neighborhood
+    :type pt_geom_column: str
     :param u_row: A row from neighborhood
     :type u_row: pd.Series
     :param v_row: A row from the neighborhood of the next gps ping
@@ -247,7 +256,7 @@ def transition_probabilities(shortest_path_calculator: ShortestPathCalculator,
     :rtype: float
     """
     routable_distance = shortest_path_calculator.distance(u_row, v_row)
-    measurement_distance = u_row.geometry.distance(v_row.geometry)
+    measurement_distance = u_row[pt_geom_column].distance(v_row[pt_geom_column])
     d = np.abs(routable_distance - measurement_distance)
     return scale * np.exp(-scale * d)
 
@@ -321,8 +330,8 @@ class ShortestPathCalculator:
         """
         s_offset = s_row.offset
         t_offset = t_row.offset
-        s_link = _get_link_key(s_row.name)
-        t_link = _get_link_key(t_row.name)
+        s_link = get_link_key(s_row.name)
+        t_link = get_link_key(t_row.name)
         if s_link == t_link:
             d = t_offset - s_offset
             if d >= 0 or self.allow_reverse:

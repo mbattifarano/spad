@@ -4,3 +4,4 @@ examples/cache/
 cache/
 images/
 docs/build/
+.coverage

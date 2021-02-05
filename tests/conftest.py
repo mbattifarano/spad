@@ -77,11 +77,15 @@ def random_walk(rng, osmnx_road_network):
     neighbors = list(osmnx_road_network.neighbors(u))
     walk = []
     while i < n and neighbors:
-        i += 1
         v = rng.choice(neighbors)
-        walk.append((u, v, 0))
-        u = v
-        neighbors = list(osmnx_road_network.neighbors(u))
+        if walk and walk[-1] == (v, u, 0):
+            # don't allow a u->v->u walk, remove v from neighbors
+            neighbors.remove(v)
+        else:
+            i += 1
+            walk.append((u, v, 0))
+            neighbors = list(osmnx_road_network.neighbors(v))
+            u = v
     return walk
 
 
