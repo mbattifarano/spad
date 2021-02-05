@@ -92,20 +92,21 @@ def build_hmm_graph(neighborhood: gpd.GeoDataFrame,
     :return: The HMM as a directed graph
     :rtype: nx.DiGraph
     """
-    g = nx.DiGraph()
+    hmm = nx.DiGraph()
     ping_neighborhoods = neighborhood.groupby(list(gps_keys))
     predecessor_candidates = [Terminals.source]
     for gps_key, candidates in ping_neighborhoods:
         for u in predecessor_candidates:
             for v in candidates.index:
-                g.add_edge(u, v)
+                hmm.add_edge(u, v)
         predecessor_candidates = candidates.index
     for u in predecessor_candidates:
-        g.add_edge(u, Terminals.target)
-    return g
+        hmm.add_edge(u, Terminals.target)
+    return hmm
 
 
 class HMMEdgeWeight:
+    """Edge weight function for the map-matching HMM graph"""
     def __init__(self, neighborhood: gpd.GeoDataFrame,
                  spc: ShortestPathCalculator, scale: float):
         """Create an edge weight function to use with an HMM directed graph
@@ -128,9 +129,9 @@ class HMMEdgeWeight:
         u_row = self._get_node_data(u)
         v_row = self._get_node_data(v)
         return (
-            node_cost(v_row)
-            + link_cost(self.spc, self.neighborhood.geometry.name,
-                        u_row, v_row, self.scale)
+                node_cost(v_row)
+                + edge_cost(self.spc, self.neighborhood.geometry.name,
+                            u_row, v_row, self.scale)
         )
 
     def _get_node_data(self, u) -> Node:
@@ -138,23 +139,25 @@ class HMMEdgeWeight:
 
 
 def is_terminal(u) -> bool:
+    """Return True if u is an member of the Terminals enum"""
     return isinstance(u, Terminals)
 
 
-def link_cost(shortest_path_calculator: ShortestPathCalculator,
+def edge_cost(shortest_path_calculator: ShortestPathCalculator,
               pt_geom_column: str,
               u: Node, v: Node, scale: float = 1.0):
+    """Compute the weight of an edge in the map-matching HMM graph"""
     if is_terminal(u) or is_terminal(v):
         return 0.0
-    else:
-        return -np.log(
-            transition_probabilities(shortest_path_calculator, pt_geom_column,
-                                     u, v, scale)
-            + EPS
-        )
+    return -np.log(
+        transition_probabilities(shortest_path_calculator, pt_geom_column,
+                                 u, v, scale)
+        + EPS
+    )
 
 
 def node_cost(u: Node):
+    """Compute the weight of a node in the map-matching HMM graph"""
     return 0.0 if is_terminal(u) else -np.log(u.p_emit + EPS)
 
 
@@ -167,6 +170,10 @@ def safe_neg_log(value: float) -> float:
 
 
 def get_link_key(compound_index: tuple) -> LinkKey:
+    """Retrieve the link index from a compound index.
+
+    It is assumed that the link key forms the tail of the compound index.
+    """
     return compound_index[-LINK_KEY_LEN:]
 
 
@@ -280,6 +287,8 @@ def buffered_geometry(points: gpd.GeoDataFrame, radius: float) -> gpd.GeoSeries:
 
 
 class ShortestPathCalculator:
+    """Compute shortest paths on a graph accounting for position within a link
+    """
     def __init__(self, g: nx.MultiDiGraph, allow_reverse: bool = True):
         """Compute shortest distance paths on a graph
 
@@ -337,8 +346,8 @@ class ShortestPathCalculator:
             if d >= 0 or self.allow_reverse:
                 return d
         s_length = s_row.link_geometry.length
-        s_u, s, k = s_link
-        t, t_v, k = t_link
+        _, s, _ = s_link
+        t, _, _ = t_link
         if t not in self.cache[s]:
             self._dijkstra(s, t)
             if t not in self.cache[s]:
@@ -436,8 +445,8 @@ class ShortestPathCalculator:
 
 
 class CacheStats:
+    """Record cache hits and misses and report basic statistics"""
     def __init__(self):
-        """Simple class to record hit and miss events."""
         self.hits = 0
         self.misses = 0
 

@@ -1,3 +1,4 @@
+"""Extract transform and load GPS trajectory data"""
 from __future__ import annotations
 
 import datetime as dt
@@ -106,9 +107,9 @@ class Columns(Enum):
 class Normalizer:
     """Normalize data within predefined bounds."""
 
-    def __init__(self, min: float = 0, max: float = 100, default: float = 0):
-        self.min = min
-        self.max = max
+    def __init__(self, vmin: float = 0, vmax: float = 100, default: float = 0):
+        self.min = vmin
+        self.max = vmax
         self.default = default
 
     def __call__(self, value):
@@ -146,18 +147,21 @@ class ActivityType(Enum):
     in_vehicle = 8
 
     @classmethod
-    def from_string(cls, value: str) -> ActivityType:
+    def from_string(cls, name: str) -> ActivityType:
+        """Return the ActivityType by name"""
         try:
-            return cls[value]
+            return cls[name]
         except KeyError:
             return cls.uncategorized
 
     @classmethod
-    def as_int(cls, value: str) -> int:
-        return cls.from_string(value).value
+    def as_int(cls, name: str) -> int:
+        """Return the int value of the ActivityType by `name`"""
+        return cls.from_string(name).value
 
     @classmethod
     def as_name(cls, value: int) -> str:
+        """Return the name of the ActivityType by value"""
         return cls(value).name
 
 
