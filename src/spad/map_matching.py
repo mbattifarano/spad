@@ -13,75 +13,60 @@ from collections import defaultdict
 from enum import Enum, auto
 from heapq import heappush, heappop
 from itertools import count
-from typing import Union, Tuple
+from typing import Union, Tuple, Iterable
 
 import geopandas as gpd
 import networkx as nx
 import numpy as np
 import pandas as pd
-from pandas.core.groupby.generic import DataFrameGroupBy
 
 
-# TODO: why does the path look so bad?
 def map_match(links: gpd.GeoDataFrame, trajectory: gpd.GeoDataFrame,
               shortest_path_calculator: ShortestPathCalculator,
               threshold: float = 250.0, accuracy: str = 'accuracy',
               scale: float = 1.0) -> pd.Series:
     neighborhood = link_neighborhood(links, trajectory, threshold)
     neighborhood['p_emit'] = emission_probabilities(neighborhood, accuracy)
-    successors = Successors(neighborhood.groupby(
-        by=trajectory.index.names,
-        group_keys=False
-    ))
-    neg_log_likelihood = {}
-    pred = defaultdict(list)
-    seen = {Terminals.source: 0}
-    c = count()
-    fringe = []
-    heappush(fringe, (0, next(c), Terminals.source))
-    while fringe:
-        nll, _, u = heappop(fringe)
-        # u is either a Terminal or an index into neighborhood
-        if u in neg_log_likelihood:
-            continue  # already searched this node
-        neg_log_likelihood[u] = nll
-        if u is Terminals.target:
-            break
-        vs = successors.successors(u)
-        if vs is Terminals.target:
-            heappush(fringe, (nll, next(c), Terminals.target))
-            pred[Terminals.target].append(u)
-        else:
-            gps_label, group = vs
-            u_row = u if isinstance(u, Terminals) else neighborhood.loc[u]
-            for v_label, row in group.iterrows():
-                cost = (
-                        node_cost(row)
-                        + link_cost(shortest_path_calculator, u_row, row, scale)
-                )
-                uv_nll = neg_log_likelihood[u] + cost
-                if v_label in neg_log_likelihood:
-                    v_nll = neg_log_likelihood[v_label]
-                    pred[v_label].append(u)
-                    if uv_nll < v_nll:
-                        raise ValueError(
-                            "Contradictory paths found, negative weights?")
-                    elif uv_nll == v_nll:
-                        pred[v_label].append(u)
-                elif v_label not in seen or uv_nll < seen[v_label]:
-                    seen[v_label] = uv_nll
-                    heappush(fringe, (uv_nll, next(c), v_label))
-                    pred[v_label].append(u)
-                elif uv_nll == seen[v_label]:
-                    pred[v_label].append(u)
-    path = []
-    u = Terminals.target
-    while True:
-        u = pred[u][0]
-        if u is Terminals.source:
-            break
-        path.append(u)
-    return list(reversed(path)), neg_log_likelihood
+    hmm = build_hmm_graph(neighborhood, trajectory.index.names)
+    weight = HMMEdgeWeight(neighborhood, shortest_path_calculator, scale)
+    path = nx.shortest_path(hmm, Terminals.source, Terminals.target, weight)
+    return path[1:-1]
+
+
+def build_hmm_graph(neighborhood: gpd.GeoDataFrame,
+                    gps_keys: Iterable[str]) -> nx.DiGraph:
+    """Construct a directed graph representing the possible HHM paths."""
+    g = nx.DiGraph()
+    ping_neighborhoods = neighborhood.groupby(list(gps_keys))
+    predecessor_candidates = [Terminals.source]
+    for gps_key, candidates in ping_neighborhoods:
+        for u in predecessor_candidates:
+            for v in candidates.index:
+                g.add_edge(u, v)
+        predecessor_candidates = candidates.index
+    for u in predecessor_candidates:
+        g.add_edge(u, Terminals.target)
+    return g
+
+
+class HMMEdgeWeight:
+    def __init__(self, neighborhood: gpd.GeoDataFrame,
+                 spc: ShortestPathCalculator, scale: float):
+        self.neighborhood = neighborhood
+        self.spc = spc
+        self.scale = scale
+
+    def __call__(self, u, v, data) -> float:
+        u_row = self._get_node_data(u)
+        v_row = self._get_node_data(v)
+        return node_cost(v_row) + link_cost(self.spc, u_row, v_row, self.scale)
+
+    def _get_node_data(self, u) -> Node:
+        return u if is_terminal(u) else self.neighborhood.loc[u]
+
+
+def is_terminal(u) -> bool:
+    return isinstance(u, Terminals)
 
 
 class Terminals(Enum):
@@ -106,28 +91,6 @@ def node_cost(u: Node):
         return 0.0
     else:
         return -np.log(u.p_emit)
-
-
-class Successors:
-    def __init__(self, neighbor_groups: DataFrameGroupBy):
-        self.groups = []
-        self.label_index = {
-            Terminals.source: -1
-        }
-        for i, (name, group) in enumerate(neighbor_groups):
-            self.groups.append((name, group))
-            self.label_index[name] = i
-
-    def successors(self, label):
-        if label is Terminals.source:
-            gps_index = label
-        else:
-            gps_index = _get_gps_key(label)
-        i = self.label_index[gps_index]
-        try:
-            return self.groups[i + 1]
-        except IndexError:
-            return Terminals.target
 
 
 LinkKey = Tuple[int, int, int]
