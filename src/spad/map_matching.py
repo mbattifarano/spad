@@ -13,7 +13,7 @@ from collections import defaultdict
 from enum import Enum, auto
 from heapq import heappush, heappop
 from itertools import count
-from typing import Union, Tuple, Iterable
+from typing import Union, Tuple, Iterable, List
 
 import geopandas as gpd
 import networkx as nx
@@ -21,10 +21,56 @@ import numpy as np
 import pandas as pd
 
 
+class Terminals(Enum):
+    """Virtual source and target nodes for the HMM directed graph"""
+    source = auto()
+    target = auto()
+
+
+Node = Union[Terminals, pd.Series]
+FloatOrColumnName = Union[str, float]
+LinkKey = Tuple[int, int, int]
+
+LINK_KEY_LEN = 3
+EPS = np.finfo(np.float).tiny
+
+
 def map_match(links: gpd.GeoDataFrame, trajectory: gpd.GeoDataFrame,
               shortest_path_calculator: ShortestPathCalculator,
-              threshold: float = 250.0, accuracy: str = 'accuracy',
-              scale: float = 1.0) -> pd.Series:
+              threshold: float = 200.0,
+              accuracy: FloatOrColumnName = 'accuracy',
+              scale: float = 1.0) -> List[tuple]:
+    """Match a single gps trajectory to network links.
+
+    The gps trajectory is projected into the coordinate reference system of the
+    links GeoDataFrame which is assumed to have real distance units (e.g.
+    meters)
+
+    :param links: A GeoDataFrame of links in the network, should be of the form
+    returned by osmnx.graph_to_gdfs
+    :type links: gpd.GeoDataFrame
+    :param trajectory: A single trajectory of temporally contiguous GPS pings
+    :type trajectory: gpd.GeoDataFrame
+    :param shortest_path_calculator: A ShortestPathCalculator for the underlying
+    road network, which should be the same as the network that `links` belongs
+    to.
+    :type shortest_path_calculator: ShortestPathCalculator
+    :param threshold: The maximum distance a gps ping can be from its matched
+    link on the network, in units of the coordinate reference system of `links`
+    :type threshold: float
+    :param accuracy: The name of the column in trajectory or a float to use as
+    the "confidence radius" of each gps ping, that is the true location is
+    within a circle of radius `accuracy` of the gps ping.
+    :type accuracy: FloatOrColumnName
+    :param scale: The scale parameter of an exponential distribution
+    characterizing the transition probability.
+    :type scale: float
+
+    :return: A list of indices mapping each gps point to a link. Each element of
+    the list is a tuple of the form (trajectory index | link index).
+    :rtype: List[tuple]
+    """
+    trajectory = trajectory.to_crs(links.crs)
     neighborhood = link_neighborhood(links, trajectory, threshold)
     neighborhood['p_emit'] = emission_probabilities(neighborhood, accuracy)
     hmm = build_hmm_graph(neighborhood, trajectory.index.names)
@@ -35,7 +81,16 @@ def map_match(links: gpd.GeoDataFrame, trajectory: gpd.GeoDataFrame,
 
 def build_hmm_graph(neighborhood: gpd.GeoDataFrame,
                     gps_keys: Iterable[str]) -> nx.DiGraph:
-    """Construct a directed graph representing the possible HHM paths."""
+    """Construct a directed graph representing the possible HHM paths.
+
+    :param neighborhood: The link neighborhood for each gps ping
+    :type neighborhood: gpd.GeoDataFrame
+    :param gps_keys: The index names of the gps trajectory GeoDataFrame
+    :type gps_keys: Iterable[str]
+
+    :return: The HMM as a directed graph
+    :rtype: nx.DiGraph
+    """
     g = nx.DiGraph()
     ping_neighborhoods = neighborhood.groupby(list(gps_keys))
     predecessor_candidates = [Terminals.source]
@@ -52,6 +107,18 @@ def build_hmm_graph(neighborhood: gpd.GeoDataFrame,
 class HMMEdgeWeight:
     def __init__(self, neighborhood: gpd.GeoDataFrame,
                  spc: ShortestPathCalculator, scale: float):
+        """Create an edge weight function to use with an HMM directed graph
+
+        Instances of this class may be directly used as edge weight functions
+        expected by networkx shortest path functions.
+
+        :param neighborhood: The link neighborhood for each gps ping
+        :type neighborhood: gpd.GeoDataFrame
+        :param spc: The shortest path calculator for the underlying network
+        :type spc: ShortestPathCalculator
+        :param scale: The scale parameter of an exponential distribution
+        characterizing the transition probability.
+        """
         self.neighborhood = neighborhood
         self.spc = spc
         self.scale = scale
@@ -69,40 +136,40 @@ def is_terminal(u) -> bool:
     return isinstance(u, Terminals)
 
 
-class Terminals(Enum):
-    source = auto()
-    target = auto()
-
-
-Node = Union[Terminals, pd.Series]
-
-
 def link_cost(shortest_path_calculator: ShortestPathCalculator,
               u: Node, v: Node, scale: float = 1.0):
-    if u is Terminals.source or v is Terminals.target:
+    if is_terminal(u) or is_terminal(v):
         return 0.0
-    return -np.log(
-        transition_probabilities(shortest_path_calculator, u, v, scale)
-    )
+    else:
+        return -np.log(
+            transition_probabilities(shortest_path_calculator, u, v, scale)
+            + EPS
+        )
 
 
 def node_cost(u: Node):
-    if isinstance(u, Terminals):
-        return 0.0
-    else:
-        return -np.log(u.p_emit)
+    return 0.0 if is_terminal(u) else -np.log(u.p_emit + EPS)
 
 
-LinkKey = Tuple[int, int, int]
-_i_link = 3
+def safe_neg_log(value: float) -> float:
+    """Returns the negative log of value plus a small constant
+
+    Value must be non-negative. Zero values will return a large positive
+
+    :param value:
+    :type value:
+    :return:
+    :rtype:
+    """
+    return -np.log(value + EPS)
 
 
 def _get_link_key(compound_index: tuple) -> LinkKey:
-    return compound_index[-_i_link:]
+    return compound_index[-LINK_KEY_LEN:]
 
 
 def _get_gps_key(compound_index: tuple) -> Tuple:
-    return compound_index[:-_i_link]
+    return compound_index[:-LINK_KEY_LEN]
 
 
 def link_neighborhood(links: gpd.GeoDataFrame, trajectory: gpd.GeoDataFrame,
@@ -144,8 +211,7 @@ def _offset_on_link(row: pd.Series) -> float:
 
 
 def emission_probabilities(neighborhood: gpd.GeoDataFrame,
-                           accuracy: Union[float, str, pd.Series]) \
-        -> gpd.GeoSeries:
+                           accuracy: FloatOrColumnName) -> gpd.GeoSeries:
     """Compute emission probabilities for each link the trajectory neighborhood
 
     :param neighborhood: A GeoDataFrame containing the link neighborhood for
@@ -206,6 +272,17 @@ def buffered_geometry(points: gpd.GeoDataFrame, radius: float) -> gpd.GeoSeries:
 
 class ShortestPathCalculator:
     def __init__(self, g: nx.MultiDiGraph, allow_reverse: bool = True):
+        """Compute shortest distance paths on a graph
+
+        :param g: A routable network in the form returned by osmnx
+        :type g: nx.MultiDiGraph
+        :param allow_reverse: Relevant when start and end locations are on the
+        same link, but the end location is behind the start direction with
+        respect to the direction of travel. If True, a vehicle is allowed to
+        reverse on the link, in which case the distance will be negative, if
+        False, the vehicle must "circle the block".
+        :type allow_reverse: bool
+        """
         self.g = g
         self.cache = defaultdict(dict)
         self.stats = CacheStats()
@@ -213,6 +290,13 @@ class ShortestPathCalculator:
 
     def distance(self, s_row: pd.Series, t_row: pd.Series) -> float:
         """Compute the shortest routable distance between nodes s and t
+
+        :param s_row: The row of neighborhood to start from
+        :type s_row: pd.Series
+        :param t_row: The row of neighborhood to end at
+        :type t_row: pd.Series
+        :return: The distance travelled on the network from s to t
+        :rtype: float
 
         Terminology:
             projection of the gps point onto the link is the point on the link
@@ -230,10 +314,10 @@ class ShortestPathCalculator:
         EXCEPT if s_link == t_link
         This occurs when the two pings are on the same link. In this case
         return t_offset - s_offset. This will be negative if the motion is
-        against the flow of traffic. In the context of the transition
-        probabilities this will be helpful to make such motion less likely, but
-        still more likely than circling the block to get to an earlier point
-        on the link.
+        against the flow of traffic and allow_reverse is True. In the context of
+        the transition probabilities this will be helpful to make such motion
+        less likely, but still more likely than circling the block to get to an
+        earlier point on the link, which will happen if allow_reverse is False.
         """
         s_offset = s_row.offset
         t_offset = t_row.offset
@@ -261,7 +345,7 @@ class ShortestPathCalculator:
 
     @staticmethod
     def _weight(u, v, data) -> float:
-        """Returns the weight for a given multi-edge"""
+        """Returns the length of an edge in the CRS units of the link"""
         return min(attr['geometry'].length for attr in data.values())
 
     def _dijkstra(self, source, target=None) -> dict:
@@ -344,23 +428,29 @@ class ShortestPathCalculator:
 
 class CacheStats:
     def __init__(self):
+        """Simple class to record hit and miss events."""
         self.hits = 0
         self.misses = 0
 
     @property
     def calls(self) -> int:
+        """Number of hits and misses"""
         return self.hits + self.misses
 
     @property
     def hit_rate(self) -> float:
+        """Fraction of calls that were hits"""
         return self.hits / self.calls
 
     @property
     def miss_rate(self) -> float:
+        """Fraction of calls that were misses"""
         return self.misses / self.calls
 
     def hit(self):
+        """Record a hit"""
         self.hits += 1
 
     def miss(self):
+        """Record a miss"""
         self.misses += 1
