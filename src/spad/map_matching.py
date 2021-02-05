@@ -1,11 +1,12 @@
 """Map Matching with a Hidden Markov Model
 
-Implementation of:
+Contains an implementation of
+Newson, Paul, and John Krumm.
+"Hidden Markov map matching through noise and sparseness."
+In Proceedings of the 17th ACM SIGSPATIAL international conference on advances
+in geographic information systems, pp. 336-343. 2009.
 
-Hidden Markov map matching through noise and sparseness
-Newson, Paul, and John Krumm
-2009
-
+See also https://github.com/valhalla/valhalla/blob/master/docs/meili/algorithms.md
 """
 from __future__ import annotations
 
@@ -48,27 +49,28 @@ def map_match(links: gpd.GeoDataFrame, trajectory: gpd.GeoDataFrame,
     meters)
 
     :param links: A GeoDataFrame of links in the network, should be of the form
-    returned by osmnx.graph_to_gdfs
+        returned by osmnx.graph_to_gdfs
     :type links: gpd.GeoDataFrame
     :param trajectory: A single trajectory of temporally contiguous GPS pings
     :type trajectory: gpd.GeoDataFrame
     :param shortest_path_calculator: A ShortestPathCalculator for the underlying
-    road network, which should be the same as the network that `links` belongs
-    to.
+        road network, which should be the same as the network that `links`
+        belongs to.
     :type shortest_path_calculator: ShortestPathCalculator
     :param threshold: The maximum distance a gps ping can be from its matched
-    link on the network, in units of the coordinate reference system of `links`
+        link on the network, in units of the coordinate reference system of
+        `links`.
     :type threshold: float
     :param accuracy: The name of the column in trajectory or a float to use as
-    the "confidence radius" of each gps ping, that is the true location is
-    within a circle of radius `accuracy` of the gps ping.
+        the "confidence radius" of each gps ping, that is the true location is
+        within a circle of radius `accuracy` of the gps ping.
     :type accuracy: FloatOrColumnName
     :param scale: The scale parameter of an exponential distribution
-    characterizing the transition probability.
+        characterizing the transition probability.
     :type scale: float
 
     :return: A list of indices mapping each gps point to a link. Each element of
-    the list is a tuple of the form (trajectory index | link index).
+        the list is a tuple of the form (trajectory index | link index).
     :rtype: List[tuple]
     """
     trajectory = trajectory.to_crs(links.crs)
@@ -157,7 +159,13 @@ def edge_cost(shortest_path_calculator: ShortestPathCalculator,
 
 
 def node_cost(u: Node):
-    """Compute the weight of a node in the map-matching HMM graph"""
+    """Compute the weight of a node in the map-matching HMM graph
+
+    :param u: A node of the HMM graph
+    :type u: Node
+    :return: The node cost
+    :rtype: float
+    """
     return 0.0 if is_terminal(u) else -np.log(u.p_emit + EPS)
 
 
@@ -165,6 +173,11 @@ def safe_neg_log(value: float) -> float:
     """Returns the negative log of value plus a small constant
 
     Value must be non-negative. Zero values will return a large positive number
+
+    :param value: A non-negative number
+    :type value: float
+    :return: -log(value)
+    :rtype: float
     """
     return -np.log(value + EPS)
 
@@ -189,13 +202,18 @@ def link_neighborhood(links: gpd.GeoDataFrame, trajectory: gpd.GeoDataFrame,
     coordinate reference system in units of meters.
 
     :param links: A GeoDataFrame of links in a road network (e.g. the output of
-    osmnx.graph_to_gdfs)
+        osmnx.graph_to_gdfs)
     :type links: gpd.GeoDataFrame
     :param trajectory: A GeoDataFrame of points
     :type trajectory: gpd.GeoDataFrame
     :param threshold: The maximum distance (in projection units) between a point
-    and the links in its neighborhood
+        and the links in its neighborhood
     :type threshold: float
+
+    :return: The link neighborhood of each point in trajectory. Retains all
+        columns from links and trajectory and is indexed by a compound index of
+        the form (trajectory.index | links.index)
+    :rtype: gpd.GeoDataFrame
     """
     points = trajectory.set_geometry(buffered_geometry(trajectory, threshold))
     links['link_geometry'] = links.geometry  # keep the geom around
@@ -228,11 +246,14 @@ def emission_probabilities(neighborhood: gpd.GeoDataFrame,
     """Compute emission probabilities for each link the trajectory neighborhood
 
     :param neighborhood: A GeoDataFrame containing the link neighborhood for
-    each point in the gps trajectory, as returned by ``link_neighborhood``
+        each point in the gps trajectory, as returned by ``link_neighborhood``
     :type neighborhood: gpd.GeoDataFrame
     :param accuracy: The accuracy of the trajectory, used as the standard
-    deviation. Can be a float, the name of a column in neighborhood, or a Series
+        deviation. Can be a float, the name of a column in neighborhood, or a Series
     :type accuracy: Union[float, str, pd.Series]
+
+    :return: The emission probability of each candidate link
+    :rtype: gpd.GeoSeries
     """
     if isinstance(accuracy, str):
         accuracy = neighborhood[accuracy]
@@ -248,7 +269,7 @@ def transition_probabilities(shortest_path_calculator: ShortestPathCalculator,
     """Compute transition probabilities between successive point-link pairs.
 
     :param shortest_path_calculator: An instance of ShortestPathCalculator for
-    the underlying road network
+        the underlying road network
     :type shortest_path_calculator: ShortestPathCalculator
     :param pt_geom_column: The name of the geometry column of neighborhood
     :type pt_geom_column: str
@@ -290,15 +311,14 @@ class ShortestPathCalculator:
     """Compute shortest paths on a graph accounting for position within a link
     """
     def __init__(self, g: nx.MultiDiGraph, allow_reverse: bool = True):
-        """Compute shortest distance paths on a graph
-
+        """
         :param g: A routable network in the form returned by osmnx
         :type g: nx.MultiDiGraph
         :param allow_reverse: Relevant when start and end locations are on the
-        same link, but the end location is behind the start direction with
-        respect to the direction of travel. If True, a vehicle is allowed to
-        reverse on the link, in which case the distance will be negative, if
-        False, the vehicle must "circle the block".
+            same link, but the end location is behind the start direction with
+            respect to the direction of travel. If True, a vehicle is allowed to
+            reverse on the link, in which case the distance will be negative, if
+            False, the vehicle must "circle the block".
         :type allow_reverse: bool
         """
         self.g = g
@@ -317,25 +337,31 @@ class ShortestPathCalculator:
         :rtype: float
 
         Terminology:
-            projection of the gps point onto the link is the point on the link
-        closest to the gps ping.
-            offset is the distance from the start of the link to the projection
-        of the gps point onto the link
+
+        projection
+            The projection of the gps point onto the link is the point on the
+            link closest to the gps ping.
+
+        offset
+            The offset is the distance from the start of the link to the
+            projection of the gps point onto the link
 
         The network distance is then the sum of the following:
+
         - the distance from the projection of s_pt to the end of the link
         - the shortest path distance from the end node of s_link to the start
-        node of t_link
+          node of t_link
         - the distance from the start node of t_link to the projection of t_pt
-        onto t_link
+          onto t_link
 
-        EXCEPT if s_link == t_link
+        EXCEPT if ``s_link == t_link``.
         This occurs when the two pings are on the same link. In this case
-        return t_offset - s_offset. This will be negative if the motion is
-        against the flow of traffic and allow_reverse is True. In the context of
-        the transition probabilities this will be helpful to make such motion
-        less likely, but still more likely than circling the block to get to an
-        earlier point on the link, which will happen if allow_reverse is False.
+        return ``t_offset - s_offset``. This will be negative if the motion is
+        against the flow of traffic and ``allow_reverse`` is True. In the
+        context of the transition probabilities this will be helpful to make
+        such motion less likely, but still more likely than circling the block
+        to get to an earlier point on the link, which will happen if
+        ``allow_reverse`` is False.
         """
         s_offset = s_row.offset
         t_offset = t_row.offset
@@ -372,35 +398,16 @@ class ShortestPathCalculator:
         Adapted from https://github.com/networkx/networkx/blob/f63e90ba4676fcb4ef74c5bd7ddda56be50d4c90/networkx/algorithms/shortest_paths/weighted.py#L755
 
         Modifications:
-            - Allows only a single source
-            - Removes pred and paths dicts as well as cutoff
-            - Caches all distances found
-            - Uses self._weight instead of passed-in weight
 
-        Parameters
-        ----------
-        source : node label
-            Starting node for the paths.
+        - Allows only a single source
+        - Removes pred and paths dicts as well as cutoff
+        - Caches all distances found
+        - Uses self._weight instead of passed-in weight
 
-        target : node label, optional
-            Ending node for path. Search is halted when target is found.
+        :param source: the node label of the start of the path
+        :param target: the node label of the end of the path
 
-        Returns
-        -------
-        distance : dictionary
-            A mapping from node to shortest distance to that node from one
-            of the source nodes.
-
-        Raises
-        ------
-        NodeNotFound
-            If any of `sources` is not in `G`.
-
-        Notes
-        -----
-        The optional predecessor and path dictionaries can be accessed by
-        the caller through the original pred and paths objects passed
-        as arguments. No need to explicitly return pred or paths.
+        :return: A dictionary of shortest distances from source to that node
 
         """
         g_succ = self.g._succ if self.g.is_directed() else self.g._adj

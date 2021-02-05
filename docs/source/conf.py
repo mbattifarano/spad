@@ -74,7 +74,8 @@ language = None
 exclude_patterns = []
 
 # The name of the Pygments (syntax highlighting) style to use.
-pygments_style = None
+pygments_style = 'sphinx'
+highlight_language = 'python3'
 
 
 # -- Options for HTML output -------------------------------------------------
@@ -192,3 +193,9 @@ intersphinx_mapping = {'https://docs.python.org/': None}
 
 # If true, `todo` and `todoList` produce output, else they produce nothing.
 todo_include_todos = True
+
+
+# dont fully qualify class names (https://stackoverflow.com/a/46033244)
+add_module_names = False
+autodoc_typehints = 'none'
+autoclass_content = 'both'
