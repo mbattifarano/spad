@@ -5,13 +5,15 @@ description = ""
 authors = ["Matt Battifarano <matthew.battifarano@gmail.com>"]
 
 [tool.poetry.dependencies]
-python = "^3.7"
+python = ">=3.7,<3.10"
 pandas = "^1.2.1"
 geopandas = "^0.8.1"
 osmnx = "^1.0.1"
 networkx = "^2.5"
 pyproj = "^3.0.0"
 toolz = "^0.11.1"
+tensorflow = "^2.7.0"
+tensorflow-probability = "^0.15.0"
 
 [tool.poetry.dev-dependencies]
 pytest = "^5.2"
@@ -23,6 +25,9 @@ pylint = "^2.6.0"
 Sphinx = "^3.4.3"
 pytest-cov = "^2.11.1"
 sphinx-rtd-theme = "^0.5.1"
+pydot = "^1.4.2"
+hypothesis = "^6.30.1"
+prospector = {extras = ["with_mypy", "with_bandit"], version = "^1.5.3"}
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

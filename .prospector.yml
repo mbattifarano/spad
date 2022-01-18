@@ -1,0 +1,22 @@
+output-format: grouped
+strictness: veryhigh
+doc-warnings: true
+test-warnings: true
+max-line-length: 79
+
+pep257:
+  run: true
+  disable:
+    - D213
+    - D203
+
+bandit:
+  run: true
+  options:
+    config: .bandit.yml
+
+mypy:
+  run: true
+  options:
+    ignore-missing-imports: true
+    follow-imports: skip
