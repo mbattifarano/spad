@@ -22,10 +22,9 @@ def read_csv(fname: str, gap_threshold: float = 30.0) -> gpd.GeoDataFrame:
         ),
         converters={
             Columns.driver_id.name: UUID,
-            Columns.shift_id.name: ToInt(default=0),
+            Columns.shift_id.name: ToInt(default=-1),
             Columns.timestamp.name: from_ms_epoch,
             Columns.activity_type.name: ActivityType.as_int,
-            Columns.activity_confidence.name: Normalizer(),
         },
     ).sort_index()
     df = pipe(
@@ -46,8 +45,8 @@ def read_csv(fname: str, gap_threshold: float = 30.0) -> gpd.GeoDataFrame:
 
 def add_row_id(df: pd.DataFrame) -> pd.DataFrame:
     """Add a unique integer id column to the dataframe."""
-    df['rowid'] = np.arange(len(df))
-    df.set_index('rowid', append=True, inplace=True)
+    df['row_id'] = np.arange(len(df))
+    df.set_index('row_id', append=True, inplace=True)
     return df
 
 

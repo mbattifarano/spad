@@ -1,7 +1,7 @@
 """Geospatial bounding box"""
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import NamedTuple, Tuple
 
 import geopandas as gpd
 import networkx as nx
@@ -10,6 +10,8 @@ import osmnx as ox
 from pyproj import CRS
 from pyproj.database import query_utm_crs_info, CRSInfo
 from pyproj.aoi import AreaOfInterest
+
+from .osm import OSMNX_NETWORK_FILTER
 
 
 WGS84 = "WGS84"
@@ -54,16 +56,27 @@ class BoundingBox(NamedTuple):
             max_lat=maxy + buffer,
         )
 
-    def to_osmnx(self) -> nx.MultiDiGraph:
-        """Create an osmnx network from the bounding box"""
-        return ox.graph_from_bbox(
+    def to_cardinal_directions(self) -> Tuple[float, float, float, float]:
+        """Return the bbox as a (north, south, east, west) tuple"""
+        return (
             self.north,
             self.south,
             self.east,
             self.west,
-            network_type="drive",
-            truncate_by_edge=True,
         )
+
+    def to_osmnx(self, utm=True) -> nx.MultiDiGraph:
+        """Create an osmnx network from the bounding box"""
+        g = ox.graph_from_bbox(
+                *self.to_cardinal_directions(),
+                network_type=None,
+                custom_filter=OSMNX_NETWORK_FILTER,
+                truncate_by_edge=True,
+                simplify=False,
+            )
+        if utm:
+            g = ox.project_graph(g)
+        return g
 
     def to_area_of_interest(self) -> AreaOfInterest:
         """Convert the bounding box to a pyproj AreaOfInterest"""

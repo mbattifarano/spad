@@ -10,21 +10,34 @@ See also https://github.com/valhalla/valhalla/blob/master/docs/meili/algorithms.
 """
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import defaultdict, deque
 from enum import Enum, auto
-from heapq import heappush, heappop
-from itertools import count
+import logging
+import time
+import datetime as dt
 from typing import Union, Tuple, Iterable, List
+import uuid
+from tqdm import tqdm
 
 import geopandas as gpd
 import networkx as nx
+from networkx.algorithms.shortest_paths.weighted import _dijkstra_multisource
 import numpy as np
 import pandas as pd
 from toolz import curry
+import osmnx as ox
+from shapely.geometry import box, Polygon
+
+from psycopg2.extras import register_uuid
+
+from .data import driver_segments, get_osmnx_network, get_osmnx_subnetwork
+
+log = logging.getLogger(__name__)
 
 
 class Terminals(Enum):
     """Virtual source and target nodes for the HMM directed graph"""
+
     source = auto()
     target = auto()
 
@@ -37,11 +50,142 @@ LINK_KEY_LEN = 3
 EPS = np.finfo(np.float).tiny
 
 
-def map_match(links: gpd.GeoDataFrame, trajectory: gpd.GeoDataFrame,
-              shortest_path_calculator: ShortestPathCalculator,
-              threshold: float = 200.0,
-              accuracy: FloatOrColumnName = 'accuracy',
-              scale: float = 1.0) -> List[tuple]:
+def map_match_trajectories(
+    conn,
+    max_ping_time_delta: dt.timedelta,
+    min_trajectory_duration: dt.timedelta,
+    max_match_distance: float,
+    transition_exp_scale: float = 1.0,
+    subnetwork_buffer: float = 2000.0,
+    lazy_load_network: bool = False,
+    limit: int = None,
+    commit_every: int = None,
+):
+    t0 = time.time()
+    if not lazy_load_network:
+        log.info(f"Using entire OSM graph.")
+        g, links = get_osmnx_network(conn)
+        preserve_index_as_columns(links)
+        links.sindex  # initialize the index
+        spc = ShortestPathCalculator(g, allow_reverse=False)
+        log.info(f"Built osmnx graph (t={time.time()-t0}s)")
+    run_uuid = uuid.uuid4()
+    log.info(f"Map-match run {run_uuid}.")
+    register_uuid()
+    with conn.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO map_match_runs (run_id, created_at, max_ping_time_delta, min_trajectory_duration, max_match_distance, transition_exp_scale, subnetwork_buffer)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """,
+            (
+                run_uuid,
+                dt.datetime.utcnow(),
+                max_ping_time_delta,
+                min_trajectory_duration,
+                max_match_distance,
+                transition_exp_scale,
+                subnetwork_buffer,
+            ),
+        )
+    n_complete = 0
+    for segment in tqdm(driver_segments(
+        conn, max_ping_time_delta, min_trajectory_duration
+    )):
+        segment_uuid = uuid.uuid4()
+        initial_ping_id = segment.loc[0].index[0]
+        log.info(f"Segment {segment_uuid} has {len(segment)} pings starting with ping {initial_ping_id}")
+        if lazy_load_network:
+            t0 = time.time()
+            log.info(f"Building subnetwork graph.")
+            g, links = get_osmnx_subnetwork(conn, segment, subnetwork_buffer)
+            preserve_index_as_columns(links)
+            links.sindex  # initialize the index
+            spc = ShortestPathCalculator(g, allow_reverse=False)
+            log.info(f"Built subnetwork in {time.time()-t0}s.")
+        max_accuracy = segment.accuracy.max()
+        if max_accuracy > max_match_distance:
+            log.warning(
+                f"Segment maximum accuracy exceeds maximum match distance: {max_accuracy} > {max_match_distance} (first ping id: {initial_ping_id})."
+            )
+        t0 = time.time()
+        path = map_match(
+            links,
+            segment,
+            spc,
+            subnetwork_buffer=subnetwork_buffer,
+            threshold=max_match_distance,
+            scale=transition_exp_scale,
+        )
+        if path is None:
+            continue
+        log.info(f"Matched {len(path)} of {len(segment)} pings in {time.time()-t0}s.")
+        with conn.cursor() as cursor:
+            n_items = 0
+            for values in expand_path_links(spc, path):
+                values = (run_uuid, segment_uuid) + tuple(values)
+                cursor.execute("""
+                    INSERT INTO map_match (run_id, segment_id, ping_order, ping_id, u, v, key)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, values)
+                n_items += 1
+        log.info(f"Pending commit: {n_items} map matched links.")
+        n_complete += 1
+        if limit is not None and n_complete >= limit:
+            log.info("Segment limit hit.")
+            break
+        if commit_every is not None and n_complete % commit_every == 0:
+            log.info(f"Committing.")
+            conn.commit()
+    log.info("done.")
+
+
+def preserve_index_as_columns(gdf: gpd.GeoDataFrame):
+    """Add the index of gdf as column(s) in-place."""
+    idx_df = gdf.index.to_frame()
+    for col in idx_df.columns:
+        gdf[col] = idx_df[col]
+
+
+def create_map_match_tables(conn):
+    with conn.cursor() as cursor:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS map_match_runs (
+                run_id uuid,
+                created_at timestamp without time zone,
+                max_ping_time_delta interval,
+                min_trajectory_duration interval,
+                max_match_distance real,
+                transition_exp_scale real,
+                subnetwork_buffer real
+            )
+        """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS map_match (
+                run_id uuid,
+                segment_id uuid,
+                ping_order integer,
+                ping_id integer,
+                u bigint,
+                v bigint,
+                key integer
+            )
+        """
+        )
+
+
+def map_match(
+    links: gpd.GeoDataFrame,
+    trajectory: gpd.GeoDataFrame,
+    shortest_path_calculator: ShortestPathCalculator,
+    subnetwork_buffer: float = 2000.0,
+    threshold: float = 25.0,
+    accuracy: FloatOrColumnName = "accuracy",
+    scale: float = 1.0,
+) -> List[tuple]:
     """Match a single gps trajectory to network links.
 
     The gps trajectory is projected into the coordinate reference system of the
@@ -73,17 +217,110 @@ def map_match(links: gpd.GeoDataFrame, trajectory: gpd.GeoDataFrame,
         the list is a tuple of the form (trajectory index | link index).
     :rtype: List[tuple]
     """
+    t0 = time.time()
     trajectory = trajectory.to_crs(links.crs)
-    neighborhood = link_neighborhood(links, trajectory, threshold)
-    neighborhood['p_emit'] = emission_probabilities(neighborhood, accuracy)
+    log.info(
+        f"Building trajectory link neighborhood (t={time.time()-t0:0.2f}s)."
+    )
+    neighborhood = link_neighborhood(links, trajectory, subnetwork_buffer=subnetwork_buffer, threshold=threshold)
+    if neighborhood is None:
+        log.warning("Link neighborhood creation failed. Skipping map matching.")
+        return None
+    log.info(f"Computing emission probabilities (t={time.time()-t0:0.2f}s).")
+    neighborhood["p_emit"] = emission_probabilities(neighborhood, accuracy)
+    log.info(f"Building HMM graph (t={time.time()-t0:0.2f}s).")
     hmm = build_hmm_graph(neighborhood, trajectory.index.names)
+    log.info(
+        f"HMM has {hmm.number_of_nodes()} nodes and {hmm.number_of_edges()} edges (t={time.time()-t0:0.2f}s)."
+    )
+    log.info(f"Computing HMM edge weights (t={time.time()-t0:0.2f}s).")
     weight = HMMEdgeWeight(neighborhood, shortest_path_calculator, scale)
+    log.info(f"Solving the HMM (t={time.time()-t0:0.2f}s).")
     path = nx.shortest_path(hmm, Terminals.source, Terminals.target, weight)
+    log.info(f"finsihed map matching in {time.time()-t0:0.2f}s.")
     return path[1:-1]
 
 
-def build_hmm_graph(neighborhood: gpd.GeoDataFrame,
-                    gps_keys: Iterable[str]) -> nx.DiGraph:
+def plot_map_match(g, trajectory, path, **plot_kws):
+    kws = dict(
+        orig_dest_size=400,
+        figsize=(12, 20),
+        show=False,
+        close=False,
+    )
+    kws.update(plot_kws)
+    nodes = path_to_nodes(g, path)
+    fig, ax = ox.plot_graph_route(g, nodes, **kws)
+    pings = trajectory.to_crs(g.graph["crs"])
+    pings.plot(ax=ax, zorder=1, markersize=200, color="blue")
+    for i, (_, row) in enumerate(pings.iterrows()):
+        x = row.geometry.x
+        y = row.geometry.y
+        ax.annotate(str(i), xy=(x, y), color="w", fontsize=32)
+    for i, u in enumerate(nodes):
+        x = g.nodes[u]["x"]
+        y = g.nodes[u]["y"]
+        ax.annotate(str(i), xy=(x, y), color="r", fontsize=32)
+
+
+def path_to_nodes(spc: ShortestPathCalculator, path):
+    nodes = []
+    for idx in path:
+        u, v, _ = get_link_key(idx)
+        if nodes:
+            # if there are nodes in the list so far
+            if (u, v) == tuple(nodes[-2:]):
+                # ignore repeat edges
+                continue
+            else:
+                v0 = nodes.pop()
+                if spc.g.number_of_edges(v0, u):
+                    # if there is an edge from v0 to u add it
+                    nodes.append(v0)
+                    nodes.append(u)
+                else:
+                    # else add the shortest path
+                    nodes.extend(spc.get_path(v0, u))
+                nodes.append(v)
+        else:
+            # just add the link
+            nodes.append(u)
+            nodes.append(v)
+    return nodes
+
+
+def expand_path_links(spc: ShortestPathCalculator, path):
+    prev_link = None
+    for idx in path:
+        u, v, k = get_link_key(idx)
+        if prev_link is None:
+            # first link
+            yield idx
+            prev_link = (u, v, k)
+        else:
+            u_prev, v_prev, k_prev = prev_link
+            if (u, v, k) == (u_prev, v_prev, k_prev):
+                # consecutive gps pings assigned to same link
+                yield idx
+            elif spc.g.number_of_edges(v_prev, u):
+                # Edges are directly connected
+                yield idx
+            else:
+                # Add edges along the shortest path from v_prev to u
+                nodes = spc.get_path(v_prev, u)
+                for _u, _v in zip(nodes, nodes[1:]):
+                    _, _k = min(
+                        (data["length"], key)
+                        for key, data in spc.g[u][v].items()
+                    )
+                    yield (None, None, _u, _v, _k)
+                yield idx
+            prev_link = (u, v, k)
+
+
+def build_hmm_graph(
+    neighborhood: gpd.GeoDataFrame, gps_keys: Iterable[str]
+) -> nx.DiGraph:
     """Construct a directed graph representing the possible HHM paths.
 
     :param neighborhood: The link neighborhood for each gps ping
@@ -109,8 +346,13 @@ def build_hmm_graph(neighborhood: gpd.GeoDataFrame,
 
 class HMMEdgeWeight:
     """Edge weight function for the map-matching HMM graph"""
-    def __init__(self, neighborhood: gpd.GeoDataFrame,
-                 spc: ShortestPathCalculator, scale: float):
+
+    def __init__(
+        self,
+        neighborhood: gpd.GeoDataFrame,
+        spc: ShortestPathCalculator,
+        scale: float,
+    ):
         """Create an edge weight function to use with an HMM directed graph
 
         Instances of this class may be directly used as edge weight functions
@@ -130,10 +372,8 @@ class HMMEdgeWeight:
     def __call__(self, u, v, data) -> float:
         u_row = self._get_node_data(u)
         v_row = self._get_node_data(v)
-        return (
-                node_cost(v_row)
-                + edge_cost(self.spc, self.neighborhood.geometry.name,
-                            u_row, v_row, self.scale)
+        return node_cost(v_row) + edge_cost(
+            self.spc, self.neighborhood.geometry.name, u_row, v_row, self.scale
         )
 
     def _get_node_data(self, u) -> Node:
@@ -145,15 +385,20 @@ def is_terminal(u) -> bool:
     return isinstance(u, Terminals)
 
 
-def edge_cost(shortest_path_calculator: ShortestPathCalculator,
-              pt_geom_column: str,
-              u: Node, v: Node, scale: float = 1.0):
+def edge_cost(
+    shortest_path_calculator: ShortestPathCalculator,
+    pt_geom_column: str,
+    u: Node,
+    v: Node,
+    scale: float = 1.0,
+):
     """Compute the weight of an edge in the map-matching HMM graph"""
     if is_terminal(u) or is_terminal(v):
         return 0.0
     return -np.log(
-        transition_probabilities(shortest_path_calculator, pt_geom_column,
-                                 u, v, scale)
+        transition_probabilities(
+            shortest_path_calculator, pt_geom_column, u, v, scale
+        )
         + EPS
     )
 
@@ -187,15 +432,19 @@ def get_link_key(compound_index: tuple) -> LinkKey:
 
     It is assumed that the link key forms the tail of the compound index.
     """
-    return compound_index[-LINK_KEY_LEN:]
+    return tuple(map(int, compound_index[-LINK_KEY_LEN:]))
 
 
 def _get_gps_key(compound_index: tuple) -> Tuple:
-    return compound_index[:-LINK_KEY_LEN]
+    return tuple(map(int, compound_index[:-LINK_KEY_LEN]))
 
 
-def link_neighborhood(links: gpd.GeoDataFrame, trajectory: gpd.GeoDataFrame,
-                      threshold: float = 250) -> gpd.GeoDataFrame:
+def link_neighborhood(
+    links: gpd.GeoDataFrame,
+    trajectory: gpd.GeoDataFrame,
+    subnetwork_buffer: float,
+    threshold: float,
+) -> gpd.GeoDataFrame:
     """Find the link neighborhood of each point in the trajectory.
 
     This function assumes that both geo dataframes are in the same projected
@@ -215,34 +464,61 @@ def link_neighborhood(links: gpd.GeoDataFrame, trajectory: gpd.GeoDataFrame,
         the form (trajectory.index | links.index)
     :rtype: gpd.GeoDataFrame
     """
-    points = trajectory.set_geometry(buffered_geometry(trajectory, threshold))
-    links['link_geometry'] = links.geometry  # keep the geom around
-    neighborhood = gpd.sjoin(
-        points,
-        links.reset_index(),  # sjoin removes the index names, keep them.
-        how="left",
-        op="intersects",
-    )
+    links["link_geometry"] = links.geometry  # keep the geom around
+    subnetwork_idx = nearby_link_idx(links, trajectory, subnetwork_buffer)
+    subnet_links = links.iloc[subnetwork_idx]
+    while True:
+        points = trajectory.set_geometry(buffered_geometry(trajectory, threshold))
+        neighborhood = gpd.sjoin(
+            points,
+            subnet_links,
+            how="left",
+            predicate="intersects",
+        )
+        failed_pings = neighborhood.osmid.isna()
+        if failed_pings.any():
+            failed_ping_ids = list(neighborhood[failed_pings].index.get_level_values("id"))
+            log.warning(f"{failed_pings.sum()} gps pings failed to match a link within {threshold} meters; re-trying with double the threshold. failed pings: {failed_ping_ids}.")
+            if threshold > subnetwork_buffer:
+                log.warning(f"The match distance threshold is larger than the subnetwork buffer. This likely means the pings are out of range of the network. Refusing to map match this segment.")
+                return None
+            threshold = threshold * 2
+        else:
+            break
     neighborhood.set_geometry(trajectory.geometry, inplace=True)
-    neighborhood.set_index(list(links.index.names),
-                           inplace=True, append=True)
-    neighborhood['distance_to_link'] = neighborhood.distance(
+    neighborhood.set_index(list(links.index.names), inplace=True, append=True)
+    neighborhood["distance_to_link"] = neighborhood.distance(
         neighborhood.link_geometry
     )
-    neighborhood['offset'] = neighborhood.apply(
-        _offset_on_link(neighborhood.geometry.name),
-        axis=1
+    neighborhood["offset"] = neighborhood.apply(
+        _offset_on_link(neighborhood.geometry.name), axis=1
     )
     return neighborhood
 
 
+BBOX_EXPAND = np.array([-1.0, -1.0, 1.0, 1.0])
+
+
+def buffered_bbox(gdf: gpd.GeoDataFrame, buffer: float) -> Polygon:
+    return box(*(gdf.total_bounds + buffer * BBOX_EXPAND))
+
+
+def nearby_link_idx(links: gpd.GeoDataFrame, trajectory: gpd.GeoDataFrame, buffer: float) -> np.array:
+    return links.sindex.query(buffered_bbox(trajectory, buffer), sort=True)
+
+
 @curry
 def _offset_on_link(pt_geom_column: str, row: pd.Series) -> float:
-    return row.link_geometry.project(row[pt_geom_column])
+    try:
+        return row.link_geometry.project(row[pt_geom_column])
+    except AttributeError:
+        log.warning(f"Neighborhood row is missing a geometry; returning nan (row: {row})")
+        return np.nan
 
 
-def emission_probabilities(neighborhood: gpd.GeoDataFrame,
-                           accuracy: FloatOrColumnName) -> gpd.GeoSeries:
+def emission_probabilities(
+    neighborhood: gpd.GeoDataFrame, accuracy: FloatOrColumnName
+) -> gpd.GeoSeries:
     """Compute emission probabilities for each link the trajectory neighborhood
 
     :param neighborhood: A GeoDataFrame containing the link neighborhood for
@@ -262,10 +538,13 @@ def emission_probabilities(neighborhood: gpd.GeoDataFrame,
     return p / z
 
 
-def transition_probabilities(shortest_path_calculator: ShortestPathCalculator,
-                             pt_geom_column: str,
-                             u_row: pd.Series, v_row: pd.Series,
-                             scale: float = 1.0) -> float:
+def transition_probabilities(
+    shortest_path_calculator: ShortestPathCalculator,
+    pt_geom_column: str,
+    u_row: pd.Series,
+    v_row: pd.Series,
+    scale: float = 1.0,
+) -> float:
     """Compute transition probabilities between successive point-link pairs.
 
     :param shortest_path_calculator: An instance of ShortestPathCalculator for
@@ -284,12 +563,16 @@ def transition_probabilities(shortest_path_calculator: ShortestPathCalculator,
     :rtype: float
     """
     routable_distance = shortest_path_calculator.distance(u_row, v_row)
-    measurement_distance = u_row[pt_geom_column].distance(v_row[pt_geom_column])
+    measurement_distance = u_row[pt_geom_column].distance(
+        v_row[pt_geom_column]
+    )
     d = np.abs(routable_distance - measurement_distance)
     return scale * np.exp(-scale * d)
 
 
-def buffered_geometry(points: gpd.GeoDataFrame, radius: float) -> gpd.GeoSeries:
+def buffered_geometry(
+    points: gpd.GeoDataFrame, radius: float
+) -> gpd.GeoSeries:
     """Compute a square buffer around each point in points
 
     The buffers are computed as the circumscribing square of a circular buffer
@@ -308,8 +591,8 @@ def buffered_geometry(points: gpd.GeoDataFrame, radius: float) -> gpd.GeoSeries:
 
 
 class ShortestPathCalculator:
-    """Compute shortest paths on a graph accounting for position within a link
-    """
+    """Compute shortest paths on a graph accounting for position within a link"""
+
     def __init__(self, g: nx.MultiDiGraph, allow_reverse: bool = True):
         """
         :param g: A routable network in the form returned by osmnx
@@ -323,8 +606,25 @@ class ShortestPathCalculator:
         """
         self.g = g
         self.cache = defaultdict(dict)
+        self.predecessors = defaultdict(dict)
         self.stats = CacheStats()
         self.allow_reverse = allow_reverse
+
+    def get_path(self, u, v):
+        nodes = [v]
+        current = v
+        pred = self.predecessors[u]
+        while current != u:
+            try:
+                current = pred[current][0]
+            except IndexError:
+                log.error(f"Failed to find predecessor for {current} on path from {u}->{v}, returning partial path.")
+                nodes.reverse()
+                return nodes
+            nodes.append(current)
+        nodes.reverse()
+        return nodes
+
 
     def distance(self, s_row: pd.Series, t_row: pd.Series) -> float:
         """Compute the shortest routable distance between nodes s and t
@@ -375,84 +675,41 @@ class ShortestPathCalculator:
         _, s, _ = s_link
         t, _, _ = t_link
         if t not in self.cache[s]:
-            self._dijkstra(s, t)
+            self.shortest_path(s, t)
             if t not in self.cache[s]:
                 raise Exception(f"{t} not in {self.cache[s]}")
             self.stats.miss()
         else:
             self.stats.hit()
         return (
-                (s_length - s_offset)  # distance from s pt to end of s link
-                + self.cache[s][t]  # path length from s->t
-                + t_offset  # distance from beginning of t link to t pt
+            (s_length - s_offset)  # distance from s pt to end of s link
+            + self.cache[s][t]  # path length from s->t
+            + t_offset  # distance from beginning of t link to t pt
         )
 
-    @staticmethod
-    def _weight(u, v, data) -> float:
-        """Returns the length of an edge in the CRS units of the link"""
-        return min(attr['geometry'].length for attr in data.values())
-
-    def _dijkstra(self, source, target=None) -> dict:
-        """Uses Dijkstra's algorithm to find shortest weighted paths
-
-        Adapted from https://github.com/networkx/networkx/blob/f63e90ba4676fcb4ef74c5bd7ddda56be50d4c90/networkx/algorithms/shortest_paths/weighted.py#L755
-
-        Modifications:
-
-        - Allows only a single source
-        - Removes pred and paths dicts as well as cutoff
-        - Caches all distances found
-        - Uses self._weight instead of passed-in weight
-
-        :param source: the node label of the start of the path
-        :param target: the node label of the end of the path
-
-        :return: A dictionary of shortest distances from source to that node
-
-        """
-        g_succ = self.g._succ if self.g.is_directed() else self.g._adj
-        weight = self._weight
-
-        push = heappush
-        pop = heappop
-        dist = self.cache[source]  # dictionary of final distances
-        seen = {}
-        # fringe is heapq with 3-tuples (distance,c,node)
-        # use the count c to avoid comparing nodes (may not be able to)
-        c = count()
-        fringe = []
-        if source not in self.g:
-            raise nx.NodeNotFound(f"Source {source} not in G")
-        seen[source] = 0
-        push(fringe, (0, next(c), source))
-        while fringe:
-            (d, _, v) = pop(fringe)
-            if v in dist:
-                continue  # already searched this node.
-            dist[v] = d
-            if v == target:
-                break
-            for u, e in g_succ[v].items():
-                cost = weight(v, u, e)
-                if cost is None:
-                    continue
-                vu_dist = dist[v] + cost
-                if u in dist:
-                    u_dist = dist[u]
-                    if vu_dist < u_dist:
-                        raise ValueError("Contradictory paths found:",
-                                         "negative weights?")
-                elif u not in seen or vu_dist < seen[u]:
-                    seen[u] = vu_dist
-                    push(fringe, (vu_dist, next(c), u))
-        if target not in dist:
+    def shortest_path(self, source, target=None) -> dict:
+        pred = {source: []}
+        dist = _dijkstra_multisource(
+            self.g,
+            [source],
+            target=target,
+            weight=self._link_length,
+            pred=pred,
+        )
+        if target is not None and target not in dist:
             dist[target] = np.inf
-        self.cache[source] = dist
-        return dist
+        self.cache[source].update(dist)
+        self.predecessors[source].update(pred)
+        return dist[target]
+
+    @staticmethod
+    def _link_length(u, v, data):
+        return min(attr["length"] for attr in data.values())
 
 
 class CacheStats:
     """Record cache hits and misses and report basic statistics"""
+
     def __init__(self):
         self.hits = 0
         self.misses = 0
