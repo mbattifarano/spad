@@ -695,6 +695,8 @@ class ShortestPathCalculator:
         self.allow_reverse = allow_reverse
 
     def get_path(self, u, v):
+        if self.dist_pred_cache.get((u, v), None) is None:
+            self.shortest_path(u, v)
         nodes = [v]
         current = v
         while current != u:
