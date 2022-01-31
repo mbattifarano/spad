@@ -65,12 +65,15 @@ def map_match_trajectories(
     limit: int = None,
     commit_every: int = None,
     allow_reverse: bool = True,
-    cache_path: Path = Path("."),
+    cache_path: str = None,
+    start_at_driver: uuid.UUID = None,
 ):
     t0 = time.time()
     run_uuid = uuid.uuid4()
     log.info(f"Map-match run {run_uuid}.")
-    db = plyvel.DB(str(cache_path / str(run_uuid)), create_if_missing=True)
+    if cache_path is None:
+        cache_path = f"./{run_uuid}"
+    db = plyvel.DB(cache_path, create_if_missing=True)
     if not lazy_load_network:
         log.info(f"Using entire OSM graph.")
         g, links = get_osmnx_network(conn)
@@ -105,7 +108,9 @@ def map_match_trajectories(
         )
     n_complete = 0
     for segment in tqdm(
-        driver_segments(conn, max_ping_time_delta, min_trajectory_duration)
+        driver_segments(
+            conn, max_ping_time_delta, min_trajectory_duration, start_at_driver
+        )
     ):
         segment_uuid = uuid.uuid4()
         initial_ping_id = segment.loc[0].index[0]
@@ -365,10 +370,7 @@ def expand_path_links(spc: ShortestPathCalculator, path):
 def _links_on_shortest_path(spc: ShortestPathCalculator, s, t):
     nodes = spc.get_path(s, t)
     for u, v in zip(nodes, nodes[1:]):
-        _, k = min(
-            (data["length"], key)
-            for key, data in spc.g[u][v].items()
-        )
+        _, k = min((data["length"], key) for key, data in spc.g[u][v].items())
         yield u, v, k
 
 

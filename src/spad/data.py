@@ -21,15 +21,15 @@ def driver_segments(
     conn,
     threshold: dt.timedelta,
     min_duration: dt.timedelta = None,
-    geometry_column="geometry",
+    start_at_driver: uuid.UUID = None,
 ) -> Iterable[gpd.GeoDataFrame]:
     cursor_kws = dict(
         name=f"driver_segments_cursor-{uuid.uuid4()}",
         cursor_factory=NamedTupleCursor,
-        withhold=True
+        withhold=True,
     )
     with conn.cursor(**cursor_kws) as cursor:
-        cursor.execute(_gps_segments_query())
+        cursor.execute(_gps_segments_query(start_at_driver))
         records = []
         for row in cursor:
             dt = _compute_dt(records, row)
@@ -125,11 +125,9 @@ def _compute_dt(records, row) -> float:
         return dt.timedelta(0)
 
 
-def _gps_segments_query() -> str:
-    return str(
-        sql.select("*")
-        .select_from(sql.table(db.GPS_TABLE_NAME))
-        .order_by(
-            sql.literal_column("driver_id"), sql.literal_column("timestamp")
-        )
-    )
+def _gps_segments_query(start_at_driver: uuid.UUID = None) -> str:
+    stmt = f"SELECT * FROM {db.GPS_TABLE_NAME}"
+    if start_at_driver is not None:
+        stmt += f" WHERE driver_id >= '{start_at_driver}'"
+    stmt += " ORDER BY driver_id, timestamp"
+    return stmt

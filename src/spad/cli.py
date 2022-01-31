@@ -129,25 +129,81 @@ class TimeInterval(click.ParamType):
 
 
 @spad.command()
-@click.option("--max-ping-time-delta", type=TimeInterval(), required=True)
-@click.option("--min-trajectory-duration", type=TimeInterval(), required=True)
 @click.option(
-    "--max-match-distance", type=float, required=True, help="(meters)"
+    "--max-ping-time-delta",
+    type=TimeInterval(),
+    required=True,
+    help="Longest time interval between two pings on the same segment.",
+)
+@click.option(
+    "--min-trajectory-duration",
+    type=TimeInterval(),
+    required=True,
+    help="Minimum duration of a segment.",
+)
+@click.option(
+    "--max-match-distance",
+    type=float,
+    required=True,
+    help=(
+        "The maximum distance in meters between a gps ping and its matched "
+        "link."
+    ),
 )
 @click.option("--db-uri", default="postgresql://", help="Database URI.")
 @click.option(
-    "--subnetwork-buffer", type=float, default=2000.0, help="(meters)"
+    "--subnetwork-buffer",
+    type=float,
+    default=2000.0,
+    help=(
+        "The buffer in meters around the trajectory to use as the local road "
+        "network."
+    ),
 )
-@click.option("--lazy-load-network", is_flag=True, default=False)
-@click.option("--transition-exp-scale", type=float, default=1.0)
-@click.option("--limit", type=int, default=None)
-@click.option("--commit-every", type=int, default=None)
+@click.option(
+    "--cache-path",
+    default=None,
+    type=click.Path(),
+    help=(
+        "LevelDB cache directory; if not specified a directory named after "
+        "the run uuid is used."
+    ),
+)
+@click.option(
+    "--start-with-driver",
+    default=None,
+    help="Skip all driver UUIDs lexographically preceeding this one.",
+)
+@click.option(
+    "--lazy-load-network",
+    is_flag=True,
+    default=False,
+    help="Load a smaller network for each gps trajectory segment.",
+)
+@click.option(
+    "--transition-exp-scale",
+    type=float,
+    default=1.0,
+    help=(
+        "The scale parameter of the exponential distribution which defines "
+        "the HMM transition probability between candidate links of successive "
+        "GPS pings."
+    ),
+)
+@click.option(
+    "--limit", type=int, default=None, help="Number of segments to map-match."
+)
+@click.option(
+    "--commit-every", type=int, default=None, help="Commit interval."
+)
 def map_match(
     max_ping_time_delta,
     min_trajectory_duration,
     max_match_distance,
     db_uri,
     subnetwork_buffer,
+    cache_path,
+    start_with_driver,
     lazy_load_network,
     transition_exp_scale,
     limit,
@@ -165,6 +221,8 @@ def map_match(
             limit=limit,
             commit_every=commit_every,
             lazy_load_network=lazy_load_network,
+            start_at_driver=start_with_driver,
+            cache_path=cache_path,
         )
 
 
