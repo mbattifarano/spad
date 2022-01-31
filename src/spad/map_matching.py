@@ -342,16 +342,16 @@ def path_to_nodes(spc: ShortestPathCalculator, path):
 def expand_path_links(spc: ShortestPathCalculator, path):
     prev_link = None
     for idx in path:
-        u, v, k = get_link_key(idx)
+        link = u, v, k = get_link_key(idx)
         if prev_link is None:
             # first link
             yield idx
         else:
-            u_prev, v_prev, k_prev = prev_link
-            if (u, v, k) == (u_prev, v_prev, k_prev):
+            _, v_prev, _ = prev_link
+            if link == prev_link:
                 # consecutive gps pings assigned to same link
                 yield idx
-            elif spc.g.number_of_edges(v_prev, u) > 0:
+            elif v_prev == u:
                 # Edges are directly connected
                 yield idx
             else:
@@ -688,7 +688,7 @@ class ShortestPathCalculator:
         :type allow_reverse: bool
         """
         self.g = g
-        self.dist_pred_cache = LevelDBWriter(lvldb, "ii", "di")
+        self.dist_pred_cache = LevelDBWriter(lvldb, "ll", "dl")
         self.cache = defaultdict(dict)
         self.predecessors = defaultdict(dict)
         self.stats = CacheStats()
@@ -696,7 +696,10 @@ class ShortestPathCalculator:
 
     def get_path(self, u, v):
         if self.dist_pred_cache.get((u, v), None) is None:
+            self.stats.miss()
             self.shortest_path(u, v)
+        else:
+            self.stats.hit()
         nodes = [v]
         current = v
         while current != u:
