@@ -16,14 +16,14 @@ units = pint.UnitRegistry()
 
 logging.basicConfig(
     level=logging.WARN,
-    format="%(asctime)s %(levelname)s %(name)s@%(lineno)d %(funcName)s: %(message)s"
+    format="%(asctime)s %(levelname)s %(name)s@%(lineno)d %(funcName)s: %(message)s",  # noqa
 )
 
 log = logging.getLogger(__name__)
 
 
-@click.group(context_settings={'show_default': True})
-@click.option('-v', '--verbose', count=True, help="Set verbosity")
+@click.group(context_settings={"show_default": True})
+@click.option("-v", "--verbose", count=True, help="Set verbosity")
 def spad(verbose):
     """SPAD command line interface."""
     _set_verbose(verbose)
@@ -131,14 +131,28 @@ class TimeInterval(click.ParamType):
 @spad.command()
 @click.option("--max-ping-time-delta", type=TimeInterval(), required=True)
 @click.option("--min-trajectory-duration", type=TimeInterval(), required=True)
-@click.option("--max-match-distance", type=float, required=True, help="(meters)")
+@click.option(
+    "--max-match-distance", type=float, required=True, help="(meters)"
+)
 @click.option("--db-uri", default="postgresql://", help="Database URI.")
-@click.option("--subnetwork-buffer", type=float, default=2000.0, help="(meters)")
+@click.option(
+    "--subnetwork-buffer", type=float, default=2000.0, help="(meters)"
+)
 @click.option("--lazy-load-network", is_flag=True, default=False)
 @click.option("--transition-exp-scale", type=float, default=1.0)
 @click.option("--limit", type=int, default=None)
 @click.option("--commit-every", type=int, default=None)
-def map_match(max_ping_time_delta, min_trajectory_duration, max_match_distance, db_uri, subnetwork_buffer, lazy_load_network, transition_exp_scale, limit, commit_every):
+def map_match(
+    max_ping_time_delta,
+    min_trajectory_duration,
+    max_match_distance,
+    db_uri,
+    subnetwork_buffer,
+    lazy_load_network,
+    transition_exp_scale,
+    limit,
+    commit_every,
+):
     with pg.connect(db_uri) as conn:
         create_map_match_tables(conn)
         map_match_trajectories(
@@ -152,6 +166,7 @@ def map_match(max_ping_time_delta, min_trajectory_duration, max_match_distance, 
             commit_every=commit_every,
             lazy_load_network=lazy_load_network,
         )
+
 
 class CLIError(SPADError):
     pass

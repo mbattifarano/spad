@@ -6,7 +6,8 @@ Newson, Paul, and John Krumm.
 In Proceedings of the 17th ACM SIGSPATIAL international conference on advances
 in geographic information systems, pp. 336-343. 2009.
 
-See also https://github.com/valhalla/valhalla/blob/master/docs/meili/algorithms.md
+See also:
+https://github.com/valhalla/valhalla/blob/master/docs/meili/algorithms.md
 """
 from __future__ import annotations
 
@@ -18,6 +19,8 @@ import datetime as dt
 from typing import Union, Tuple, Iterable, List
 import uuid
 from tqdm import tqdm
+import plyvel
+from pathlib import Path
 
 import geopandas as gpd
 import networkx as nx
@@ -28,9 +31,10 @@ from toolz import curry
 import osmnx as ox
 from shapely.geometry import box, Polygon
 
-from psycopg2.extras import register_uuid
+from psycopg2.extras import register_uuid, execute_values
 
 from .data import driver_segments, get_osmnx_network, get_osmnx_subnetwork
+from .cache import LevelDBWriter
 
 log = logging.getLogger(__name__)
 
@@ -60,22 +64,33 @@ def map_match_trajectories(
     lazy_load_network: bool = False,
     limit: int = None,
     commit_every: int = None,
+    allow_reverse: bool = True,
+    cache_path: Path = Path("."),
 ):
     t0 = time.time()
+    run_uuid = uuid.uuid4()
+    log.info(f"Map-match run {run_uuid}.")
+    db = plyvel.DB(str(cache_path / str(run_uuid)), create_if_missing=True)
     if not lazy_load_network:
         log.info(f"Using entire OSM graph.")
         g, links = get_osmnx_network(conn)
         preserve_index_as_columns(links)
         links.sindex  # initialize the index
-        spc = ShortestPathCalculator(g, allow_reverse=False)
+        spc = ShortestPathCalculator(g, allow_reverse=allow_reverse, lvldb=db)
         log.info(f"Built osmnx graph (t={time.time()-t0}s)")
-    run_uuid = uuid.uuid4()
-    log.info(f"Map-match run {run_uuid}.")
     register_uuid()
     with conn.cursor() as cursor:
         cursor.execute(
             """
-            INSERT INTO map_match_runs (run_id, created_at, max_ping_time_delta, min_trajectory_duration, max_match_distance, transition_exp_scale, subnetwork_buffer)
+            INSERT INTO map_match_runs (
+                run_id,
+                created_at,
+                max_ping_time_delta,
+                min_trajectory_duration,
+                max_match_distance,
+                transition_exp_scale,
+                subnetwork_buffer
+            )
             VALUES (%s, %s, %s, %s, %s, %s, %s)
         """,
             (
@@ -89,24 +104,31 @@ def map_match_trajectories(
             ),
         )
     n_complete = 0
-    for segment in tqdm(driver_segments(
-        conn, max_ping_time_delta, min_trajectory_duration
-    )):
+    for segment in tqdm(
+        driver_segments(conn, max_ping_time_delta, min_trajectory_duration)
+    ):
         segment_uuid = uuid.uuid4()
         initial_ping_id = segment.loc[0].index[0]
-        log.info(f"Segment {segment_uuid} has {len(segment)} pings starting with ping {initial_ping_id}")
+        log.info(
+            f"Segment {segment_uuid} has {len(segment)} pings starting with "
+            f"ping {initial_ping_id}"
+        )
         if lazy_load_network:
             t0 = time.time()
             log.info(f"Building subnetwork graph.")
             g, links = get_osmnx_subnetwork(conn, segment, subnetwork_buffer)
             preserve_index_as_columns(links)
             links.sindex  # initialize the index
-            spc = ShortestPathCalculator(g, allow_reverse=False)
+            spc = ShortestPathCalculator(
+                g, allow_reverse=allow_reverse, lvldb=db
+            )
             log.info(f"Built subnetwork in {time.time()-t0}s.")
         max_accuracy = segment.accuracy.max()
         if max_accuracy > max_match_distance:
             log.warning(
-                f"Segment maximum accuracy exceeds maximum match distance: {max_accuracy} > {max_match_distance} (first ping id: {initial_ping_id})."
+                f"Segment maximum accuracy exceeds maximum match distance: "
+                f"{max_accuracy} > {max_match_distance} "
+                f"(first ping id: {initial_ping_id})."
             )
         t0 = time.time()
         path = map_match(
@@ -119,16 +141,32 @@ def map_match_trajectories(
         )
         if path is None:
             continue
-        log.info(f"Matched {len(path)} of {len(segment)} pings in {time.time()-t0}s.")
+        log.info(
+            f"Matched {len(path)} of {len(segment)} pings in "
+            f"{time.time()-t0}s."
+        )
         with conn.cursor() as cursor:
-            n_items = 0
-            for values in expand_path_links(spc, path):
-                values = (run_uuid, segment_uuid) + tuple(values)
-                cursor.execute("""
-                    INSERT INTO map_match (run_id, segment_id, ping_order, ping_id, u, v, key)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """, values)
-                n_items += 1
+            values = [
+                (run_uuid, segment_uuid, link_order) + tuple(values)
+                for link_order, values in enumerate(
+                    expand_path_links(spc, path)
+                )
+            ]
+            n_items = len(values)
+            execute_values(
+                cursor,
+                """INSERT INTO map_match (
+                    run_id,
+                    segment_id,
+                    link_order,
+                    ping_order,
+                    ping_id,
+                    u,
+                    v,
+                    key
+                ) VALUES %s""",
+                values,
+            )
         log.info(f"Pending commit: {n_items} map matched links.")
         n_complete += 1
         if limit is not None and n_complete >= limit:
@@ -137,6 +175,9 @@ def map_match_trajectories(
         if commit_every is not None and n_complete % commit_every == 0:
             log.info(f"Committing.")
             conn.commit()
+        log.info(
+            f"Shortest paths cache hit rate: {100*spc.stats.hit_rate:0.2f}%"
+        )
     log.info("done.")
 
 
@@ -169,6 +210,7 @@ def create_map_match_tables(conn):
                 segment_id uuid,
                 ping_order integer,
                 ping_id integer,
+                link_order integer,
                 u bigint,
                 v bigint,
                 key integer
@@ -197,9 +239,9 @@ def map_match(
     :type links: gpd.GeoDataFrame
     :param trajectory: A single trajectory of temporally contiguous GPS pings
     :type trajectory: gpd.GeoDataFrame
-    :param shortest_path_calculator: A ShortestPathCalculator for the underlying
-        road network, which should be the same as the network that `links`
-        belongs to.
+    :param shortest_path_calculator: A ShortestPathCalculator for the
+        underlying road network, which should be the same as the network that
+        `links` belongs to.
     :type shortest_path_calculator: ShortestPathCalculator
     :param threshold: The maximum distance a gps ping can be from its matched
         link on the network, in units of the coordinate reference system of
@@ -213,8 +255,8 @@ def map_match(
         characterizing the transition probability.
     :type scale: float
 
-    :return: A list of indices mapping each gps point to a link. Each element of
-        the list is a tuple of the form (trajectory index | link index).
+    :return: A list of indices mapping each gps point to a link. Each element
+        of the list is a tuple of the form (trajectory index | link index).
     :rtype: List[tuple]
     """
     t0 = time.time()
@@ -222,16 +264,24 @@ def map_match(
     log.info(
         f"Building trajectory link neighborhood (t={time.time()-t0:0.2f}s)."
     )
-    neighborhood = link_neighborhood(links, trajectory, subnetwork_buffer=subnetwork_buffer, threshold=threshold)
+    neighborhood = link_neighborhood(
+        links,
+        trajectory,
+        subnetwork_buffer=subnetwork_buffer,
+        threshold=threshold,
+    )
     if neighborhood is None:
-        log.warning("Link neighborhood creation failed. Skipping map matching.")
+        log.warning(
+            "Link neighborhood creation failed. Skipping map matching."
+        )
         return None
     log.info(f"Computing emission probabilities (t={time.time()-t0:0.2f}s).")
     neighborhood["p_emit"] = emission_probabilities(neighborhood, accuracy)
     log.info(f"Building HMM graph (t={time.time()-t0:0.2f}s).")
     hmm = build_hmm_graph(neighborhood, trajectory.index.names)
     log.info(
-        f"HMM has {hmm.number_of_nodes()} nodes and {hmm.number_of_edges()} edges (t={time.time()-t0:0.2f}s)."
+        f"HMM has {hmm.number_of_nodes()} nodes and {hmm.number_of_edges()} "
+        f"edges (t={time.time()-t0:0.2f}s)."
     )
     log.info(f"Computing HMM edge weights (t={time.time()-t0:0.2f}s).")
     weight = HMMEdgeWeight(neighborhood, shortest_path_calculator, scale)
@@ -296,7 +346,6 @@ def expand_path_links(spc: ShortestPathCalculator, path):
         if prev_link is None:
             # first link
             yield idx
-            prev_link = (u, v, k)
         else:
             u_prev, v_prev, k_prev = prev_link
             if (u, v, k) == (u_prev, v_prev, k_prev):
@@ -313,9 +362,14 @@ def expand_path_links(spc: ShortestPathCalculator, path):
                         (data["length"], key)
                         for key, data in spc.g[u][v].items()
                     )
-                    yield (None, None, _u, _v, _k)
+                    yield with_null_gps_key(len(idx), (_u, _v, _k))
                 yield idx
-            prev_link = (u, v, k)
+        prev_link = (u, v, k)
+
+
+def with_null_gps_key(idx_len: int, link_key: tuple) -> tuple:
+    null_gps_key = (None,) * (idx_len - LINK_KEY_LEN)
+    return null_gps_key + link_key
 
 
 def build_hmm_graph(
@@ -435,7 +489,7 @@ def get_link_key(compound_index: tuple) -> LinkKey:
     return tuple(map(int, compound_index[-LINK_KEY_LEN:]))
 
 
-def _get_gps_key(compound_index: tuple) -> Tuple:
+def get_gps_key(compound_index: tuple) -> Tuple:
     return tuple(map(int, compound_index[:-LINK_KEY_LEN]))
 
 
@@ -455,8 +509,8 @@ def link_neighborhood(
     :type links: gpd.GeoDataFrame
     :param trajectory: A GeoDataFrame of points
     :type trajectory: gpd.GeoDataFrame
-    :param threshold: The maximum distance (in projection units) between a point
-        and the links in its neighborhood
+    :param threshold: The maximum distance (in projection units) between a
+        point and the links in its neighborhood
     :type threshold: float
 
     :return: The link neighborhood of each point in trajectory. Retains all
@@ -468,7 +522,9 @@ def link_neighborhood(
     subnetwork_idx = nearby_link_idx(links, trajectory, subnetwork_buffer)
     subnet_links = links.iloc[subnetwork_idx]
     while True:
-        points = trajectory.set_geometry(buffered_geometry(trajectory, threshold))
+        points = trajectory.set_geometry(
+            buffered_geometry(trajectory, threshold)
+        )
         neighborhood = gpd.sjoin(
             points,
             subnet_links,
@@ -477,10 +533,21 @@ def link_neighborhood(
         )
         failed_pings = neighborhood.osmid.isna()
         if failed_pings.any():
-            failed_ping_ids = list(neighborhood[failed_pings].index.get_level_values("id"))
-            log.warning(f"{failed_pings.sum()} gps pings failed to match a link within {threshold} meters; re-trying with double the threshold. failed pings: {failed_ping_ids}.")
+            failed_ping_ids = list(
+                neighborhood[failed_pings].index.get_level_values("id")
+            )
+            log.warning(
+                f"{failed_pings.sum()} gps pings failed to match a link "
+                f"within {threshold} meters; re-trying with double the "
+                f"threshold. failed pings: {failed_ping_ids}."
+            )
             if threshold > subnetwork_buffer:
-                log.warning(f"The match distance threshold is larger than the subnetwork buffer. This likely means the pings are out of range of the network. Refusing to map match this segment.")
+                log.warning(
+                    "The match distance threshold is larger than the "
+                    "subnetwork buffer. This likely means the pings "
+                    "are out of range of the network. Refusing to map "
+                    "match this segment."
+                )
                 return None
             threshold = threshold * 2
         else:
@@ -503,7 +570,9 @@ def buffered_bbox(gdf: gpd.GeoDataFrame, buffer: float) -> Polygon:
     return box(*(gdf.total_bounds + buffer * BBOX_EXPAND))
 
 
-def nearby_link_idx(links: gpd.GeoDataFrame, trajectory: gpd.GeoDataFrame, buffer: float) -> np.array:
+def nearby_link_idx(
+    links: gpd.GeoDataFrame, trajectory: gpd.GeoDataFrame, buffer: float
+) -> np.array:
     return links.sindex.query(buffered_bbox(trajectory, buffer), sort=True)
 
 
@@ -512,7 +581,10 @@ def _offset_on_link(pt_geom_column: str, row: pd.Series) -> float:
     try:
         return row.link_geometry.project(row[pt_geom_column])
     except AttributeError:
-        log.warning(f"Neighborhood row is missing a geometry; returning nan (row: {row})")
+        log.warning(
+            f"Neighborhood row is missing a geometry; returning nan "
+            f"(row: {row})"
+        )
         return np.nan
 
 
@@ -525,7 +597,8 @@ def emission_probabilities(
         each point in the gps trajectory, as returned by ``link_neighborhood``
     :type neighborhood: gpd.GeoDataFrame
     :param accuracy: The accuracy of the trajectory, used as the standard
-        deviation. Can be a float, the name of a column in neighborhood, or a Series
+        deviation. Can be a float, the name of a column in neighborhood, or a
+        Series
     :type accuracy: Union[float, str, pd.Series]
 
     :return: The emission probability of each candidate link
@@ -591,20 +664,26 @@ def buffered_geometry(
 
 
 class ShortestPathCalculator:
-    """Compute shortest paths on a graph accounting for position within a link"""
+    """Compute shortest paths on a graph accounting for position on a link"""
 
-    def __init__(self, g: nx.MultiDiGraph, allow_reverse: bool = True):
+    def __init__(
+        self,
+        g: nx.MultiDiGraph,
+        allow_reverse: bool = True,
+        lvldb: plyvel.DB = None,
+    ):
         """
         :param g: A routable network in the form returned by osmnx
         :type g: nx.MultiDiGraph
         :param allow_reverse: Relevant when start and end locations are on the
             same link, but the end location is behind the start direction with
-            respect to the direction of travel. If True, a vehicle is allowed to
-            reverse on the link, in which case the distance will be negative, if
-            False, the vehicle must "circle the block".
+            respect to the direction of travel. If True, a vehicle is allowed
+            to reverse on the link, in which case the distance will be
+            negative, if False, the vehicle must "circle the block".
         :type allow_reverse: bool
         """
         self.g = g
+        self.dist_pred_cache = LevelDBWriter(lvldb, "ii", "di")
         self.cache = defaultdict(dict)
         self.predecessors = defaultdict(dict)
         self.stats = CacheStats()
@@ -613,18 +692,26 @@ class ShortestPathCalculator:
     def get_path(self, u, v):
         nodes = [v]
         current = v
-        pred = self.predecessors[u]
         while current != u:
             try:
-                current = pred[current][0]
-            except IndexError:
-                log.error(f"Failed to find predecessor for {current} on path from {u}->{v}, returning partial path.")
+                _, current = self.dist_pred_cache.get((u, current))
+            except KeyError:
+                log.error(
+                    f"Failed to find predecessor for {current} on path from "
+                    f"{u}->{v}, returning partial path."
+                )
+                nodes.reverse()
+                return nodes
+            if current == -1:
+                log.error(
+                    f"Failed to find predecessor for {current} on path from "
+                    f"{u}->{v}, returning partial path."
+                )
                 nodes.reverse()
                 return nodes
             nodes.append(current)
         nodes.reverse()
         return nodes
-
 
     def distance(self, s_row: pd.Series, t_row: pd.Series) -> float:
         """Compute the shortest routable distance between nodes s and t
@@ -674,16 +761,15 @@ class ShortestPathCalculator:
         s_length = s_row.link_geometry.length
         _, s, _ = s_link
         t, _, _ = t_link
-        if t not in self.cache[s]:
-            self.shortest_path(s, t)
-            if t not in self.cache[s]:
-                raise Exception(f"{t} not in {self.cache[s]}")
-            self.stats.miss()
-        else:
+        try:
+            dist, _ = self.dist_pred_cache.get((s, t))
             self.stats.hit()
+        except KeyError:
+            dist = self.shortest_path(s, t)
+            self.stats.miss()
         return (
             (s_length - s_offset)  # distance from s pt to end of s link
-            + self.cache[s][t]  # path length from s->t
+            + dist  # path length from s->t
             + t_offset  # distance from beginning of t link to t pt
         )
 
@@ -698,8 +784,11 @@ class ShortestPathCalculator:
         )
         if target is not None and target not in dist:
             dist[target] = np.inf
-        self.cache[source].update(dist)
-        self.predecessors[source].update(pred)
+        with self.dist_pred_cache.db.write_batch() as batch:
+            for v, distance in dist.items():
+                preds = pred[v]
+                predecessor = preds[0] if preds else -1
+                self.dist_pred_cache.put((source, v), (distance, predecessor))
         return dist[target]
 
     @staticmethod
