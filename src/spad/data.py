@@ -31,15 +31,20 @@ def driver_segments(
     with conn.cursor(**cursor_kws) as cursor:
         cursor.execute(_gps_segments_query(start_at_driver))
         records = []
+        current_driver = None
         for row in cursor:
             dt = _compute_dt(records, row)
-            if dt > threshold:
+            if dt > threshold or _is_new_driver(current_driver, row.driver_id):
                 if _exceeds_duration(min_duration, records):
                     yield _to_geo_dataframe(records)
+                current_driver = row.driver_id
                 records.clear()
-            else:
-                records.append(row)
+            records.append(row)
     cursor.close()
+
+
+def _is_new_driver(current_driver, this_driver):
+    return (this_driver != current_driver) and (current_driver is not None)
 
 
 def get_osmnx_table(conn, table_name: str, geom_wkb: str = None, **kws):
