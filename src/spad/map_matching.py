@@ -351,20 +351,25 @@ def expand_path_links(spc: ShortestPathCalculator, path):
             if (u, v, k) == (u_prev, v_prev, k_prev):
                 # consecutive gps pings assigned to same link
                 yield idx
-            elif spc.g.number_of_edges(v_prev, u):
+            elif spc.g.number_of_edges(v_prev, u) > 0:
                 # Edges are directly connected
                 yield idx
             else:
                 # Add edges along the shortest path from v_prev to u
-                nodes = spc.get_path(v_prev, u)
-                for _u, _v in zip(nodes, nodes[1:]):
-                    _, _k = min(
-                        (data["length"], key)
-                        for key, data in spc.g[u][v].items()
-                    )
-                    yield with_null_gps_key(len(idx), (_u, _v, _k))
+                for link_idx in _links_on_shortest_path(spc, v_prev, u):
+                    yield with_null_gps_key(len(idx), link_idx)
                 yield idx
         prev_link = (u, v, k)
+
+
+def _links_on_shortest_path(spc: ShortestPathCalculator, s, t):
+    nodes = spc.get_path(s, t)
+    for u, v in zip(nodes, nodes[1:]):
+        _, k = min(
+            (data["length"], key)
+            for key, data in spc.g[u][v].items()
+        )
+        yield u, v, k
 
 
 def with_null_gps_key(idx_len: int, link_key: tuple) -> tuple:
