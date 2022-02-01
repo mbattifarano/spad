@@ -1,3 +1,4 @@
+from re import L
 from typing import Iterable, Tuple
 import datetime as dt
 import uuid
@@ -15,13 +16,15 @@ import osmnx as ox
 from sqlalchemy import sql, func as sql_fn
 import logging
 from . import db
-from .common import to_travel_time
+from .common import SPADError, to_travel_time
 
 
 log = logging.getLogger(__name__)
-
-
 units = pint.UnitRegistry()
+LINK_SPEED = "speed"
+LINK_TRAVEL_TIME = "travel_time"
+MAX_SPEED_LIMIT = 70.0 * units.mph
+TRAVEL_TIME_UNITS = "minutes"
 
 
 def driver_segments(
@@ -71,9 +74,40 @@ def get_osmnx_table(conn, table_name: str, geom_wkb: str = None, **kws):
 
 
 def osmnx_sql(table_name: str, geom_wkb: str = None) -> str:
-    stmt = f"SELECT * FROM {table_name}"
+    if table_name == db.NODES_TABLE_NAME:
+        stmt = f"SELECT * FROM {table_name}"
+    elif table_name == db.LINKS_TABLE_NAME:
+        stmt = f"""
+            with
+                highway_avg_speed as (
+                    select
+                        highway,
+                        sum(maxspeed * n_links) / sum(n_links) as maxspeed
+                    from osmnx_default_maxspeed
+                    group by 1
+                )
+            select
+                l.*,
+                coalesce(l.maxspeed,
+                         ds.maxspeed,
+                         ha.maxspeed,
+                         15.0) as {LINK_SPEED}
+            from {table_name} l
+            left join pa_municipalities pm
+                on st_intersects(st_centroid(l.geometry), pm.geom)
+            left join osmnx_default_maxspeed ds
+                on pm.fed_aid_ur = ds.fed_urban_level
+                   and l.highway = ds.highway
+            left join highway_avg_speed ha
+                on l.highway = ha.highway
+        """
+    else:
+        raise DataError(
+            f"Unrecognized table name: {table_name}. "
+            "Must be one of [{db.NODES_TABLE_NAME}, {db.LINKS_TABLE_NAME}]"
+        )
     if geom_wkb:
-        stmt += f" WHERE ST_Intersects(geometry, %s)"
+        stmt += "\nWHERE ST_Intersects(geometry, %s)"
     log.info(f"OSMNX SQL for {table_name}: {stmt}")
     return stmt
 
@@ -91,50 +125,14 @@ def get_osmnx_gdfs(conn, geom_wkb: str = None):
 def get_osmnx_network(conn, geom_wkb: str = None):
     log.info("Retrieving OSMNX network data.")
     nodes, links = get_osmnx_gdfs(conn, geom_wkb)
+    links[LINK_TRAVEL_TIME] = to_travel_time(
+        links.length.astype("pint[meter]"),
+        links[LINK_SPEED].astype("pint[mph]"),
+    ).pint.m_as(TRAVEL_TIME_UNITS)
     log.info("Forming OSMNX graph.")
     g = ox.graph_from_gdfs(nodes, links)
     log.info("done.")
     return g, links
-
-
-ROAD_CLASS_SPEEDS = {
-    "motorway": 70.0,
-    "motorway_link": 70.0,
-    "trunk": 65.0,
-    "tunk_link": 55.0,
-    "primary": 55.0,
-    "primary_link": 50.0,
-    "secondary": 45.0,
-    "secondary_link": 45.0,
-    "road": 45.0,
-    "tertiary": 35.0,
-    "tertiary_link": 35.0,
-    "unclassified": 35.0,
-    "residential": 25.0,
-    "living_street": 15.0,
-    "alley": 15.0,
-    "service": 15.0,
-}
-
-SERVICE_SPEEDS = {
-    "alley": 15.0,
-    "driveway": 10.0,
-    "parking_aisle": 10.0,
-    "aisle": 10.0,
-    "drive-through": 10.0,
-    "Service_Road": 15.0,
-}
-
-DEFAULT_ROAD = 25.0
-
-
-def infer_speed(link_row: pd.Series):
-    if not np.isnan(link_row.maxspeed):
-        return link_row.maxspeed
-    service_speed = SERVICE_SPEEDS.get(link_row.service)
-    if service_speed is not None:
-        return service_speed
-    return ROAD_CLASS_SPEEDS.get(link_row.highway, DEFAULT_ROAD)
 
 
 def get_osmnx_subnetwork(
@@ -157,21 +155,11 @@ def _exceeds_duration(threshold, records):
     return duration >= (threshold or dt.timedelta(0))
 
 
-LINK_SPEED = "speed"
-LINK_TRAVEL_TIME = "travel_time"
-MAX_SPEED_LIMIT = 70.0 * units.mph
-TRAVEL_TIME_UNITS = "minutes"
-
-
 def _to_geo_dataframe(records, geometry_column="geometry"):
     df = pd.DataFrame(records)
     df.index.rename("ping_order", inplace=True)
     df.set_index("id", inplace=True, append=True)
     _repair_accuracy(df)
-    df[LINK_SPEED] = df.apply(infer_speed, axis=1)
-    df[LINK_TRAVEL_TIME] = to_travel_time(
-        df.length.astype("pint[meter]"), df[LINK_SPEED].astype("pint[mph]")
-    ).pint.m_as(TRAVEL_TIME_UNITS)
     df[geometry_column] = geoms = df[geometry_column].apply(_to_geom)
     return gpd.GeoDataFrame(df, crs=_get_srid(geoms), geometry=geometry_column)
 
@@ -206,3 +194,7 @@ def _gps_segments_query(start_at_driver: uuid.UUID = None) -> str:
     stmt += " ORDER BY driver_id, timestamp"
     log.info(f"GPS segments query: {stmt}")
     return stmt
+
+
+class DataError(SPADError):
+    pass
