@@ -1,3 +1,6 @@
+from pint import Quantity
+
+
 def default_on_none(obj, default):
     """Return obj or default if obj is None"""
     return default if obj is None else obj
@@ -5,3 +8,7 @@ def default_on_none(obj, default):
 
 class SPADError(Exception):
     pass
+
+
+def to_travel_time(distance: Quantity, speed: Quantity) -> Quantity:
+    return distance / speed

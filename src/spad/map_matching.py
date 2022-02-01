@@ -18,6 +18,7 @@ import time
 import datetime as dt
 from typing import Union, Tuple, Iterable, List
 import uuid
+from pint import Quantity, UnitRegistry
 from tqdm import tqdm
 import plyvel
 
@@ -32,10 +33,20 @@ from shapely.geometry import box, Polygon
 
 from psycopg2.extras import register_uuid, execute_values
 
-from .data import driver_segments, get_osmnx_network, get_osmnx_subnetwork
+from .data import (
+    LINK_TRAVEL_TIME,
+    driver_segments,
+    get_osmnx_network,
+    get_osmnx_subnetwork,
+    MAX_SPEED_LIMIT,
+    TRAVEL_TIME_UNITS,
+)
 from .cache import LevelDBWriter
+from .common import to_travel_time
 
 log = logging.getLogger(__name__)
+
+units = UnitRegistry()
 
 
 class Terminals(Enum):
@@ -280,7 +291,9 @@ def map_match(
         )
         return None
     log.info(f"Computing emission probabilities (t={time.time()-t0:0.2f}s).")
-    neighborhood["p_emit"] = emission_probabilities(neighborhood, accuracy)
+    neighborhood["logp_emit"] = log_emission_probabilities(
+        neighborhood, accuracy
+    )
     log.info(f"Building HMM graph (t={time.time()-t0:0.2f}s).")
     hmm = build_hmm_graph(neighborhood, trajectory.index.names)
     log.info(
@@ -455,11 +468,8 @@ def edge_cost(
     """Compute the weight of an edge in the map-matching HMM graph"""
     if is_terminal(u) or is_terminal(v):
         return 0.0
-    return -np.log(
-        transition_probabilities(
-            shortest_path_calculator, pt_geom_column, u, v, scale
-        )
-        + EPS
+    return -log_transition_probabilities(
+        shortest_path_calculator, pt_geom_column, u, v, scale
     )
 
 
@@ -471,7 +481,7 @@ def node_cost(u: Node):
     :return: The node cost
     :rtype: float
     """
-    return 0.0 if is_terminal(u) else -np.log(u.p_emit + EPS)
+    return 0.0 if is_terminal(u) else -u.logp_emit
 
 
 def safe_neg_log(value: float) -> float:
@@ -594,10 +604,10 @@ def _offset_on_link(pt_geom_column: str, row: pd.Series) -> float:
         return np.nan
 
 
-def emission_probabilities(
+def log_emission_probabilities(
     neighborhood: gpd.GeoDataFrame, accuracy: FloatOrColumnName
 ) -> gpd.GeoSeries:
-    """Compute emission probabilities for each link the trajectory neighborhood
+    """Compute log emission probabilities for links the trajectory neighborhood
 
     :param neighborhood: A GeoDataFrame containing the link neighborhood for
         each point in the gps trajectory, as returned by ``link_neighborhood``
@@ -607,24 +617,24 @@ def emission_probabilities(
         Series
     :type accuracy: Union[float, str, pd.Series]
 
-    :return: The emission probability of each candidate link
+    :return: The log emission probability of each candidate link
     :rtype: gpd.GeoSeries
     """
     if isinstance(accuracy, str):
         accuracy = neighborhood[accuracy]
     z = accuracy * np.sqrt(2 * np.pi)
-    p = np.exp(-0.5 * (neighborhood.distance_to_link / accuracy) ** 2)
-    return p / z
+    logp = -0.5 * (neighborhood.distance_to_link / accuracy) ** 2
+    return logp - np.log(z)
 
 
-def transition_probabilities(
+def log_transition_probabilities(
     shortest_path_calculator: ShortestPathCalculator,
     pt_geom_column: str,
     u_row: pd.Series,
     v_row: pd.Series,
     scale: float = 1.0,
 ) -> float:
-    """Compute transition probabilities between successive point-link pairs.
+    """Compute log transition probabilities between successive point-link pairs
 
     :param shortest_path_calculator: An instance of ShortestPathCalculator for
         the underlying road network
@@ -638,15 +648,19 @@ def transition_probabilities(
     :param scale: The scale parameter of an exponential distribution
     :type scale: float
 
-    :return: The transition probability
+    :return: The log transition probability
     :rtype: float
     """
-    routable_distance = shortest_path_calculator.distance(u_row, v_row)
-    measurement_distance = u_row[pt_geom_column].distance(
-        v_row[pt_geom_column]
+    travel_time = shortest_path_calculator.distance(u_row, v_row)
+    baseline_tt = best_travel_time(
+        u_row[pt_geom_column].distance(v_row[pt_geom_column]) * units.meter
     )
-    d = np.abs(routable_distance - measurement_distance)
-    return scale * np.exp(-scale * d)
+    d = np.abs(travel_time - baseline_tt)
+    return np.log(scale) - scale * d
+
+
+def best_travel_time(distance: Quantity):
+    return to_travel_time(distance, MAX_SPEED_LIMIT).m_as(TRAVEL_TIME_UNITS)
 
 
 def buffered_geometry(
@@ -728,13 +742,13 @@ class ShortestPathCalculator:
         return nodes
 
     def distance(self, s_row: pd.Series, t_row: pd.Series) -> float:
-        """Compute the shortest routable distance between nodes s and t
+        """Compute the shortest routable travel time between nodes s and t
 
         :param s_row: The row of neighborhood to start from
         :type s_row: pd.Series
         :param t_row: The row of neighborhood to end at
         :type t_row: pd.Series
-        :return: The distance travelled on the network from s to t
+        :return: The travel time on the network from s to t
         :rtype: float
 
         Terminology:
@@ -747,22 +761,22 @@ class ShortestPathCalculator:
             The offset is the distance from the start of the link to the
             projection of the gps point onto the link
 
-        The network distance is then the sum of the following:
+        The network travel time is then the sum of the following:
 
-        - the distance from the projection of s_pt to the end of the link
-        - the shortest path distance from the end node of s_link to the start
-          node of t_link
-        - the distance from the start node of t_link to the projection of t_pt
-          onto t_link
+        - the travel time from the projection of s_pt to the end of the link
+        - the shortest path travel time from the end node of s_link to the
+          start node of t_link
+        - the travel time from the start node of t_link to the projection of
+          t_pt onto t_link
 
         EXCEPT if ``s_link == t_link``.
         This occurs when the two pings are on the same link. In this case
-        return ``t_offset - s_offset``. This will be negative if the motion is
-        against the flow of traffic and ``allow_reverse`` is True. In the
-        context of the transition probabilities this will be helpful to make
-        such motion less likely, but still more likely than circling the block
-        to get to an earlier point on the link, which will happen if
-        ``allow_reverse`` is False.
+        return the travel time between the offsets. This will be negative if
+        the motion is against the flow of traffic and ``allow_reverse`` is
+        True. In the context of the transition probabilities this will be
+        helpful to make such motion less likely, but still more likely than
+        circling the block to get to an earlier point on the link, which will
+        happen if ``allow_reverse`` is False.
         """
         s_offset = s_row.offset
         t_offset = t_row.offset
@@ -771,7 +785,9 @@ class ShortestPathCalculator:
         if s_link == t_link:
             d = t_offset - s_offset
             if d >= 0 or self.allow_reverse:
-                return d
+                return to_travel_time(
+                    d * units.meter, s_link.speed * units.mph
+                )
         s_length = s_row.link_geometry.length
         _, s, _ = s_link
         t, _, _ = t_link
@@ -782,9 +798,17 @@ class ShortestPathCalculator:
             dist = self.shortest_path(s, t)
             self.stats.miss()
         return (
-            (s_length - s_offset)  # distance from s pt to end of s link
+            to_travel_time(
+                (s_length - s_offset) * units.meter, s_row.speed * units.mph
+            ).m_as(
+                TRAVEL_TIME_UNITS
+            )  # distance from s pt to end of s link
             + dist  # path length from s->t
-            + t_offset  # distance from beginning of t link to t pt
+            + to_travel_time(
+                t_offset * units.meter, t_row.speed * units.mph
+            ).m_as(
+                TRAVEL_TIME_UNITS
+            )  # distance from beginning of t link to t pt
         )
 
     def shortest_path(self, source, target=None) -> dict:
@@ -813,7 +837,7 @@ class ShortestPathCalculator:
 
     @staticmethod
     def _link_length(u, v, data):
-        return min(attr["length"] for attr in data.values())
+        return min(attr[LINK_TRAVEL_TIME] for attr in data.values())
 
 
 class CacheStats:
