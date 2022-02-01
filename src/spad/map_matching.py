@@ -796,11 +796,13 @@ class ShortestPathCalculator:
         )
         if target is not None and target not in dist:
             dist[target] = np.inf
+            log.warning(f"No path found from {source} to {target}.")
         with self.dist_pred_cache.db.write_batch() as batch:
             for v, distance in dist.items():
-                preds = pred[v]
-                predecessor = preds[0] if preds else -1
-                self.dist_pred_cache.put((source, v), (distance, predecessor))
+                predecessor = -1 if np.isinf(distance) else pred[v][0]
+                self.dist_pred_cache.put(
+                    (source, v), (distance, predecessor), batch=batch
+                )
         return dist[target]
 
     @staticmethod

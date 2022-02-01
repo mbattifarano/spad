@@ -2,8 +2,8 @@ from struct import Struct
 from typing import Tuple
 import plyvel
 
-KEY_SCHEMA_KEY = b'__schema_key__'
-VALUE_SCHEMA_KEY = b'__schema_value__'
+KEY_SCHEMA_KEY = b"__schema_key__"
+VALUE_SCHEMA_KEY = b"__schema_value__"
 
 
 class BytesConverter:
@@ -22,7 +22,9 @@ class Raise:
 
 
 class LevelDBWriter:
-    def __init__(self, db: plyvel.DB, key_fmt: str = None, val_fmt: str = None) -> None:
+    def __init__(
+        self, db: plyvel.DB, key_fmt: str = None, val_fmt: str = None
+    ) -> None:
         self.db = db
         self.key = BytesConverter(key_fmt) if key_fmt else None
         self.value = BytesConverter(val_fmt) if val_fmt else None
@@ -37,9 +39,16 @@ class LevelDBWriter:
     def get(self, key: Tuple, default=KeyError):
         res = self.db.get(self.key.encode(*key))
         if res is None:
-            if isinstance(default, Exception):
+            if is_subclass(default, Exception):
                 raise default(key)
             else:
                 return default
         else:
             return self.value.decode(res)
+
+
+def is_subclass(obj, cls) -> bool:
+    try:
+        return issubclass(obj, cls)
+    except TypeError:
+        return False

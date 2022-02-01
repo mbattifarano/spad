@@ -28,7 +28,9 @@ def driver_segments(
         cursor_factory=NamedTupleCursor,
         withhold=True,
     )
-    with conn.cursor(**cursor_kws) as cursor:
+    log.info(f"Using server-side cursor {cursor_kws['name']}.")
+    cursor = conn.cursor(**cursor_kws)
+    try:
         cursor.execute(_gps_segments_query(start_at_driver))
         records = []
         current_driver = None
@@ -40,7 +42,10 @@ def driver_segments(
                 current_driver = row.driver_id
                 records.clear()
             records.append(row)
-    cursor.close()
+        if _exceeds_duration(min_duration, records):
+            yield _to_geo_dataframe(records)
+    finally:
+        cursor.close()
 
 
 def _is_new_driver(current_driver, this_driver):

@@ -209,7 +209,8 @@ def map_match(
     limit,
     commit_every,
 ):
-    with pg.connect(db_uri) as conn:
+    conn = pg.connect(db_uri)
+    try:
         create_map_match_tables(conn)
         map_match_trajectories(
             conn,
@@ -224,6 +225,13 @@ def map_match(
             start_at_driver=start_with_driver,
             cache_path=cache_path,
         )
+    except:  # noqa: E722 do not use bare 'except'
+        conn.rollback()
+        raise
+    else:
+        conn.commit()
+    finally:
+        conn.close()
 
 
 class CLIError(SPADError):
