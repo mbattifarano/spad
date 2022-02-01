@@ -6,7 +6,10 @@ from tensosflow_probability import bijectors
 from tensorflow.keras.layers import Layer
 from scipy.sparse import coo_matrix
 from .sparse_utils import (
-    coo_indices, coo_values, tf_sparse_negate, tf_sparse_repmat
+    coo_indices,
+    coo_values,
+    tf_sparse_negate,
+    tf_sparse_repmat,
 )
 
 from .common import default_on_none
@@ -43,11 +46,14 @@ class UEAE(tf.keras.Model):
     As this is an auto-encoder, it should be fit with the training data as its
     own target: `model.fit(obs, obs)`
     """
-    def __init__(self, link_cost_estimator: Layer,
-                 link_flow_loader: 'StochasticNetworkLoading',
-                 logits: 'LogitLayer',
-                 preprocessor: bijectors.Bijector = None,
-                 ) -> None:
+
+    def __init__(
+        self,
+        link_cost_estimator: Layer,
+        link_flow_loader: "StochasticNetworkLoading",
+        logits: "LogitLayer",
+        preprocessor: bijectors.Bijector = None,
+    ) -> None:
         """Initialize the SPAD model.
 
         Args:
@@ -78,8 +84,15 @@ class UEAE(tf.keras.Model):
 class StochasticNetworkLoading(Layer):
     """Stochastic Network Loading (SNL) layer."""
 
-    def __init__(self, q_init: coo_matrix, trainable=True, name=None,
-                 dtype=None, dynamic=False, **kwargs):
+    def __init__(
+        self,
+        q_init: coo_matrix,
+        trainable=True,
+        name=None,
+        dtype=None,
+        dynamic=False,
+        **kwargs,
+    ):
         """Initialize the SNL layer with an initial OD demand.
 
         When the demand is known, this layer should set `trainable=False`.
@@ -93,8 +106,13 @@ class StochasticNetworkLoading(Layer):
                 Defaults to None.
             dynamic (bool, optional): Defaults to False.
         """
-        super().__init__(trainable=trainable, name=name, dtype=dtype,
-                         dynamic=dynamic, **kwargs)
+        super().__init__(
+            trainable=trainable,
+            name=name,
+            dtype=dtype,
+            dynamic=dynamic,
+            **kwargs,
+        )
         validate_demand_initializer(q_init)
         self.n_nodes = q_init.shape[0]
         self.trips = coo_indices(q_init)
@@ -124,7 +142,7 @@ class StochasticNetworkLoading(Layer):
         return tf.SparseTensor(
             indices=self.trips,
             values=self.demand,
-            dense_shape=(self.n_nodes, self.n_nodes)
+            dense_shape=(self.n_nodes, self.n_nodes),
         )
 
     def link_weights(self, inputs: tf.SparseTensor) -> tf.SparseTensor:
@@ -156,20 +174,15 @@ class StochasticNetworkLoading(Layer):
         """
         n_samples = inputs.shape[0]
         identity = tf_sparse_repmat(
-            tf.sparse.expand_dims(self.identity, 0),
-            n_samples,
-            axis=0
+            tf.sparse.expand_dims(self.identity, 0), n_samples, axis=0
         )
         Q = tf.sparse.to_dense(self.Q)
         V = tf.linalg.inv(
             tf.sparse.to_dense(
-                tf.sparse.add(
-                    identity,
-                    tf_sparse_negate(inputs)
-                )
+                tf.sparse.add(identity, tf_sparse_negate(inputs))
             )
         )
-        normalizer = 1.0 / tf.where(tf.equal(V, 0.), 1.0, V)
+        normalizer = 1.0 / tf.where(tf.equal(V, 0.0), 1.0, V)
         return tf.einsum("rs, iru, ivs, irs -> iuv", Q, V, V, normalizer)
 
     def call(self, inputs: tf.SparseTensor) -> tf.SparseTensor:
@@ -190,8 +203,15 @@ class StochasticNetworkLoading(Layer):
 class LogitLayer(Layer):
     """Convert cost to utility in logits."""
 
-    def __init__(self, node_constants: tf.Tensor = None, trainable=False,
-                 name=None, dtype=None, dynamic=False, **kwargs):
+    def __init__(
+        self,
+        node_constants: tf.Tensor = None,
+        trainable=False,
+        name=None,
+        dtype=None,
+        dynamic=False,
+        **kwargs,
+    ):
         """Initialize the logit layer.
 
         This layer is non-trainable by default.
@@ -202,14 +222,21 @@ class LogitLayer(Layer):
             dtype ([type], optional): Defaults to None.
             dynamic (bool, optional): Defaults to False.
         """
-        super().__init__(trainable=trainable, name=name, dtype=dtype,
-                         dynamic=dynamic, **kwargs)
+        super().__init__(
+            trainable=trainable,
+            name=name,
+            dtype=dtype,
+            dynamic=dynamic,
+            **kwargs,
+        )
         self.link_constants = (
-            tf.constant(0.0, dtype=self.dtype) if node_constants is None
+            tf.constant(0.0, dtype=self.dtype)
+            if node_constants is None
             else to_link_constants(node_constants)
         )
-        self.rationality = tf.Variable(1.0, trainable=self.trainable,
-                                       dtype=self.dtype)
+        self.rationality = tf.Variable(
+            1.0, trainable=self.trainable, dtype=self.dtype
+        )
 
     def to_logits(self, inputs: tf.Tensor) -> tf.Tensor:
         """Return the utility (in logits) of the input cost.
@@ -233,8 +260,7 @@ class LogitLayer(Layer):
         """
         mask = inputs.with_values(tf.ones_like(inputs.values))
         return tf.sparse.add(
-            tf.broadcast_to(self.link_constants, mask.shape) * mask,
-            inputs
+            tf.broadcast_to(self.link_constants, mask.shape) * mask, inputs
         )
 
     def call(self, inputs: tf.SparseTensor) -> tf.SparseTensor:
@@ -247,13 +273,13 @@ class LogitLayer(Layer):
             tf.SparseTensor: Utility in logits
         """
         return tf.sparse.map_values(
-            self.to_logits,
-            self.condition_costs(inputs)
+            self.to_logits, self.condition_costs(inputs)
         )
 
 
 class SparseLinearLayer(Layer):
     """A linear layer for sparse tensors."""
+
     # TODO: implement
     # idea: W (link x links sparse) * x (X.values.reshape((batch, n_links))) + b
 
@@ -300,10 +326,6 @@ def to_link_constants(node_constants: tf.Tensor) -> tf.Tensor:
     Returns:
         tf.Tensor: A nodes x nodes tensor of link constants
     """
-    n_nodes, = node_constants.shape
-    nc = tf.repeat(
-        tf.expand_dims(node_constants, 1),
-        n_nodes,
-        axis=1
-    )
+    (n_nodes,) = node_constants.shape
+    nc = tf.repeat(tf.expand_dims(node_constants, 1), n_nodes, axis=1)
     return nc - tf.transpose(nc)

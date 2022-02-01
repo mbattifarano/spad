@@ -41,11 +41,7 @@ def to_tf_sparse(a: spmatrix) -> tf.SparseTensor:
         tf.SparseTensor: An equivalent tensorflow sparse matrix.
     """
     coo = a.tocoo()
-    return tf.SparseTensor(
-        list(zip(coo.row, coo.col)),
-        coo.data,
-        coo.shape
-    )
+    return tf.SparseTensor(list(zip(coo.row, coo.col)), coo.data, coo.shape)
 
 
 def tf_sparse_scalar_multiply(m: float, a: tf.SparseTensor) -> tf.SparseTensor:
@@ -73,8 +69,9 @@ def tf_sparse_negate(a: tf.SparseTensor) -> tf.SparseTensor:
     return tf_sparse_scalar_multiply(-1.0, a)
 
 
-def tf_sparse_repmat(a: tf.SparseTensor, n: int, axis: int = 0) \
-        -> tf.SparseTensor:
+def tf_sparse_repmat(
+    a: tf.SparseTensor, n: int, axis: int = 0
+) -> tf.SparseTensor:
     """Replicate the sparse tensor a n times over the specified axis.
 
     Args:
@@ -86,7 +83,4 @@ def tf_sparse_repmat(a: tf.SparseTensor, n: int, axis: int = 0) \
         tf.SparseTensor: A sparse tensor with n compies of the input
             concatenated over the specified axis.
     """
-    return tf.sparse.concat(
-        sp_inputs=[a] * n,
-        axis=axis
-    )
+    return tf.sparse.concat(sp_inputs=[a] * n, axis=axis)

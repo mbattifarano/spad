@@ -19,6 +19,7 @@ WGS84 = "WGS84"
 
 class BoundingBox(NamedTuple):
     """Represents a geospatial bounding box"""
+
     min_lon: float
     min_lat: float
     max_lon: float
@@ -45,8 +46,9 @@ class BoundingBox(NamedTuple):
         return self.min_lon
 
     @staticmethod
-    def from_geodataframe(df: gpd.GeoDataFrame, buffer: float = 0.0) \
-            -> BoundingBox:
+    def from_geodataframe(
+        df: gpd.GeoDataFrame, buffer: float = 0.0
+    ) -> BoundingBox:
         """Create a bounding box for the spatial data in a geodataframe"""
         minx, miny, maxx, maxy = df.geometry.total_bounds
         return BoundingBox(
@@ -68,12 +70,12 @@ class BoundingBox(NamedTuple):
     def to_osmnx(self, utm=True) -> nx.MultiDiGraph:
         """Create an osmnx network from the bounding box"""
         g = ox.graph_from_bbox(
-                *self.to_cardinal_directions(),
-                network_type=None,
-                custom_filter=OSMNX_NETWORK_FILTER,
-                truncate_by_edge=True,
-                simplify=False,
-            )
+            *self.to_cardinal_directions(),
+            network_type=None,
+            custom_filter=OSMNX_NETWORK_FILTER,
+            truncate_by_edge=True,
+            simplify=False,
+        )
         if utm:
             g = ox.project_graph(g)
         return g
@@ -92,13 +94,10 @@ class BoundingBox(NamedTuple):
         return query_utm_crs_info(
             datum_name=WGS84,
             area_of_interest=self.to_area_of_interest(),
-            contains=True
+            contains=True,
         ).pop()
 
     def get_utm(self) -> CRS:
         """Get the CRS for the UTM zone that contains the bounding box"""
         crs_info = self.utm_crs_info()
-        return CRS.from_authority(
-            crs_info.auth_name,
-            crs_info.code
-        )
+        return CRS.from_authority(crs_info.auth_name, crs_info.code)

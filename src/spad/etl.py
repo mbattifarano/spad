@@ -18,7 +18,7 @@ def read_csv(fname: str, gap_threshold: float = 30.0) -> gpd.GeoDataFrame:
         index_col=(
             Columns.driver_id.name,
             Columns.shift_id.name,
-            Columns.timestamp.name
+            Columns.timestamp.name,
         ),
         converters={
             Columns.driver_id.name: UUID,
@@ -27,26 +27,19 @@ def read_csv(fname: str, gap_threshold: float = 30.0) -> gpd.GeoDataFrame:
             Columns.activity_type.name: ActivityType.as_int,
         },
     ).sort_index()
-    df = pipe(
-        df,
-        add_row_id,
-        compute_dt,
-        compute_segment_ids(gap_threshold)
-    )
+    df = pipe(df, add_row_id, compute_dt, compute_segment_ids(gap_threshold))
     return gpd.GeoDataFrame(
         df,
         geometry=gpd.points_from_xy(
-            df[Columns.lon.name],
-            df[Columns.lat.name],
-            crs="WGS84"
-        )
+            df[Columns.lon.name], df[Columns.lat.name], crs="WGS84"
+        ),
     )
 
 
 def add_row_id(df: pd.DataFrame) -> pd.DataFrame:
     """Add a unique integer id column to the dataframe."""
-    df['row_id'] = np.arange(len(df))
-    df.set_index('row_id', append=True, inplace=True)
+    df["row_id"] = np.arange(len(df))
+    df.set_index("row_id", append=True, inplace=True)
     return df
 
 
@@ -56,12 +49,10 @@ def compute_dt(df: pd.DataFrame) -> pd.DataFrame:
     Pings are partitioned by driver and shift before dt is computed
     """
     df.reset_index(Columns.timestamp.name, inplace=True)
-    df['dt'] = (
+    df["dt"] = (
         df.groupby([Columns.driver_id.name, Columns.shift_id.name])
-          .timestamp
-          .diff()
-          .dt
-          .total_seconds()
+        .timestamp.diff()
+        .dt.total_seconds()
     )
     df.set_index(Columns.timestamp.name, append=True, inplace=True)
     return df
@@ -74,10 +65,9 @@ def compute_segment_ids(threshold: float, df: pd.DataFrame) -> pd.DataFrame:
     A segment of a driver's trajectory on a shift is defined as set of
     consecutive pings that are no more than threshold seconds apart.
     """
-    df['segment_id'] = (df.groupby([Columns.driver_id.name,
-                                    Columns.shift_id.name])
-                          .dt.apply(_count_gaps(threshold))
-                        )
+    df["segment_id"] = df.groupby(
+        [Columns.driver_id.name, Columns.shift_id.name]
+    ).dt.apply(_count_gaps(threshold))
     return df
 
 

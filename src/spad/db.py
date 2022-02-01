@@ -89,7 +89,9 @@ def _convert_maxspeed(s):
         try:
             return unit.m_as("mph")
         except pint.errors.PintError:
-            log.warning(f"Could not convert maxspeed {unit} to mph; returning nan.")
+            log.warning(
+                f"Could not convert maxspeed {unit} to mph; returning nan."
+            )
             return np.nan
     else:
         return unit
@@ -105,7 +107,9 @@ def _convert_width(s):
         try:
             return unit.m_as("meter")
         except pint.errors.PintError:
-            log.warning(f"Could not convert width {unit} to meters; returning nan.")
+            log.warning(
+                f"Could not convert width {unit} to meters; returning nan."
+            )
             return np.nan
     else:
         return unit
@@ -178,9 +182,7 @@ def osmnx_links_to_pg(links: gpd.GeoDataFrame, con: Engine, if_exists: str):
 
 def is_container_type(obj) -> bool:
     return (
-        isinstance(obj, list)
-        or isinstance(obj, tuple)
-        or isinstance(obj, set)
+        isinstance(obj, list) or isinstance(obj, tuple) or isinstance(obj, set)
     )
 
 
