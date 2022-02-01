@@ -11,7 +11,7 @@ https://github.com/valhalla/valhalla/blob/master/docs/meili/algorithms.md
 """
 from __future__ import annotations
 
-from collections import defaultdict, deque
+from collections import defaultdict
 from enum import Enum, auto
 import logging
 import time
@@ -20,7 +20,6 @@ from typing import Union, Tuple, Iterable, List
 import uuid
 from tqdm import tqdm
 import plyvel
-from pathlib import Path
 
 import geopandas as gpd
 import networkx as nx
@@ -670,6 +669,9 @@ def buffered_geometry(
     ).envelope
 
 
+NULL_NODE = -1
+
+
 class ShortestPathCalculator:
     """Compute shortest paths on a graph accounting for position on a link"""
 
@@ -714,7 +716,7 @@ class ShortestPathCalculator:
                 )
                 nodes.reverse()
                 return nodes
-            if current == -1:
+            if current == NULL_NODE:
                 log.error(
                     f"Failed to find predecessor for {current} on path from "
                     f"{u}->{v}, returning partial path."
@@ -799,7 +801,11 @@ class ShortestPathCalculator:
             log.warning(f"No path found from {source} to {target}.")
         with self.dist_pred_cache.db.write_batch() as batch:
             for v, distance in dist.items():
-                predecessor = -1 if np.isinf(distance) else pred[v][0]
+                predecessor = (
+                    NULL_NODE
+                    if (np.isinf(distance) or v == source)
+                    else pred[v][0]
+                )
                 self.dist_pred_cache.put(
                     (source, v), (distance, predecessor), batch=batch
                 )
