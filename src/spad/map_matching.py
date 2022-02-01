@@ -172,6 +172,9 @@ def map_match_trajectories(
                 values,
             )
         log.info(f"Pending commit: {n_items} map matched links.")
+        log.info(
+            f"Shortest paths cache hit rate: {100*spc.stats.hit_rate:0.2f}%"
+        )
         n_complete += 1
         if limit is not None and n_complete >= limit:
             log.info("Segment limit hit.")
@@ -179,9 +182,6 @@ def map_match_trajectories(
         if commit_every is not None and n_complete % commit_every == 0:
             log.info(f"Committing.")
             conn.commit()
-        log.info(
-            f"Shortest paths cache hit rate: {100*spc.stats.hit_rate:0.2f}%"
-        )
     log.info("done.")
 
 
@@ -291,7 +291,7 @@ def map_match(
     weight = HMMEdgeWeight(neighborhood, shortest_path_calculator, scale)
     log.info(f"Solving the HMM (t={time.time()-t0:0.2f}s).")
     path = nx.shortest_path(hmm, Terminals.source, Terminals.target, weight)
-    log.info(f"finsihed map matching in {time.time()-t0:0.2f}s.")
+    log.info(f"finished map matching in {time.time()-t0:0.2f}s.")
     return path[1:-1]
 
 
