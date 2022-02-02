@@ -174,7 +174,7 @@ def _to_geo_dataframe(records, geometry_column="geometry"):
 def _repair_accuracy(df):
     max_accuracy = df.accuracy.max()
     df.accuracy.fillna(max_accuracy, inplace=True)
-    df.accuracy[df.accuracy < 0.0] = max_accuracy
+    df.loc[df.accuracy < 0.0, "accuracy"] = max_accuracy
     df.accuracy.clip(lower=MIN_ACCURACY, inplace=True)
 
 
