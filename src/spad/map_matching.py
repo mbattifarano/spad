@@ -823,8 +823,14 @@ class ShortestPathCalculator:
             pred=pred,
         )
         if target is not None and target not in dist:
-            dist[target] = np.inf
             log.warning(f"No path found from {source} to {target}.")
+            # _dijkstra_multisource terminates early when it finds the
+            # target. When it doesn't, we are guaranteed to have
+            # searched every node reachable from source so any node
+            # not in `dist` is unreachable from source.
+            for nid in self.g.nodes:
+                if nid not in dist:
+                    dist[nid] = np.inf
         with self.dist_pred_cache.db.write_batch() as batch:
             for v, distance in dist.items():
                 predecessor = (
