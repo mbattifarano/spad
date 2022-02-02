@@ -1,4 +1,6 @@
-from pint import Quantity
+from pint import Quantity, UnitRegistry
+
+units = UnitRegistry()
 
 
 def default_on_none(obj, default):

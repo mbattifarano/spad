@@ -16,15 +16,16 @@ import osmnx as ox
 from sqlalchemy import sql, func as sql_fn
 import logging
 from . import db
-from .common import SPADError, to_travel_time
+from .common import SPADError, to_travel_time, units
+from textwrap import dedent
 
 
 log = logging.getLogger(__name__)
-units = pint.UnitRegistry()
-LINK_SPEED = "speed"
+LINK_SPEED = "travel_speed"
 LINK_TRAVEL_TIME = "travel_time"
 MAX_SPEED_LIMIT = 70.0 * units.mph
 TRAVEL_TIME_UNITS = "minutes"
+MIN_ACCURACY = 1.0
 
 
 def driver_segments(
@@ -75,9 +76,14 @@ def get_osmnx_table(conn, table_name: str, geom_wkb: str = None, **kws):
 
 def osmnx_sql(table_name: str, geom_wkb: str = None) -> str:
     if table_name == db.NODES_TABLE_NAME:
-        stmt = f"SELECT * FROM {table_name}"
+        stmt = dedent(
+            f"""
+        SELECT * FROM {table_name}
+        """
+        )
     elif table_name == db.LINKS_TABLE_NAME:
-        stmt = f"""
+        stmt = dedent(
+            f"""
             with
                 highway_avg_speed as (
                     select
@@ -101,14 +107,15 @@ def osmnx_sql(table_name: str, geom_wkb: str = None) -> str:
             left join highway_avg_speed ha
                 on l.highway = ha.highway
         """
+        )
     else:
         raise DataError(
             f"Unrecognized table name: {table_name}. "
             "Must be one of [{db.NODES_TABLE_NAME}, {db.LINKS_TABLE_NAME}]"
         )
     if geom_wkb:
-        stmt += "\nWHERE ST_Intersects(geometry, %s)"
-    log.info(f"OSMNX SQL for {table_name}: {stmt}")
+        stmt += "WHERE ST_Intersects(geometry, %s)"
+    log.debug(f"OSMNX SQL for {table_name}: {stmt}")
     return stmt
 
 
@@ -165,8 +172,10 @@ def _to_geo_dataframe(records, geometry_column="geometry"):
 
 
 def _repair_accuracy(df):
-    df.accuracy.fillna(df.accuracy.max(), inplace=True)
-    df.accuracy.clip(lower=1.0, inplace=True)
+    max_accuracy = df.accuracy.max()
+    df.accuracy.fillna(max_accuracy, inplace=True)
+    df.accuracy[df.accuracy < 0.0] = max_accuracy
+    df.accuracy.clip(lower=MIN_ACCURACY, inplace=True)
 
 
 def _get_srid(geoms):

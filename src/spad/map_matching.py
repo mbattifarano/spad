@@ -34,6 +34,7 @@ from shapely.geometry import box, Polygon
 from psycopg2.extras import register_uuid, execute_values
 
 from .data import (
+    LINK_SPEED,
     LINK_TRAVEL_TIME,
     driver_segments,
     get_osmnx_network,
@@ -42,11 +43,9 @@ from .data import (
     TRAVEL_TIME_UNITS,
 )
 from .cache import LevelDBWriter
-from .common import to_travel_time
+from .common import to_travel_time, units
 
 log = logging.getLogger(__name__)
-
-units = UnitRegistry()
 
 
 class Terminals(Enum):
@@ -77,6 +76,7 @@ def map_match_trajectories(
     allow_reverse: bool = True,
     cache_path: str = None,
     start_at_driver: uuid.UUID = None,
+    accuracy_scale: float = 1.0,
 ):
     t0 = time.time()
     run_uuid = uuid.uuid4()
@@ -153,6 +153,7 @@ def map_match_trajectories(
             subnetwork_buffer=subnetwork_buffer,
             threshold=max_match_distance,
             scale=transition_exp_scale,
+            accuracy_scale=accuracy_scale,
         )
         if path is None:
             continue
@@ -242,6 +243,7 @@ def map_match(
     threshold: float = 25.0,
     accuracy: FloatOrColumnName = "accuracy",
     scale: float = 1.0,
+    accuracy_scale: float = 1.0,
 ) -> List[tuple]:
     """Match a single gps trajectory to network links.
 
@@ -292,7 +294,7 @@ def map_match(
         return None
     log.info(f"Computing emission probabilities (t={time.time()-t0:0.2f}s).")
     neighborhood["logp_emit"] = log_emission_probabilities(
-        neighborhood, accuracy
+        neighborhood, accuracy, scale=accuracy_scale
     )
     log.info(f"Building HMM graph (t={time.time()-t0:0.2f}s).")
     hmm = build_hmm_graph(neighborhood, trajectory.index.names)
@@ -605,7 +607,9 @@ def _offset_on_link(pt_geom_column: str, row: pd.Series) -> float:
 
 
 def log_emission_probabilities(
-    neighborhood: gpd.GeoDataFrame, accuracy: FloatOrColumnName
+    neighborhood: gpd.GeoDataFrame,
+    accuracy: FloatOrColumnName,
+    scale: float = 1.0,
 ) -> gpd.GeoSeries:
     """Compute log emission probabilities for links the trajectory neighborhood
 
@@ -616,14 +620,18 @@ def log_emission_probabilities(
         deviation. Can be a float, the name of a column in neighborhood, or a
         Series
     :type accuracy: Union[float, str, pd.Series]
+    :param scale: Scale accuracy by this factor. Larger numbers allow more
+        flexibility in matching the pings to further links.
+    :type scale: float
 
     :return: The log emission probability of each candidate link
     :rtype: gpd.GeoSeries
     """
     if isinstance(accuracy, str):
         accuracy = neighborhood[accuracy]
-    z = accuracy * np.sqrt(2 * np.pi)
-    logp = -0.5 * (neighborhood.distance_to_link / accuracy) ** 2
+    acc = scale * accuracy
+    z = acc * np.sqrt(2 * np.pi)
+    logp = -0.5 * (neighborhood.distance_to_link / acc) ** 2
     return logp - np.log(z)
 
 
@@ -785,9 +793,7 @@ class ShortestPathCalculator:
         if s_link == t_link:
             d = t_offset - s_offset
             if d >= 0 or self.allow_reverse:
-                return to_travel_time(
-                    d * units.meter, s_link.speed * units.mph
-                )
+                return _to_travel_minutes(d, s_row)
         s_length = s_row.link_geometry.length
         _, s, _ = s_link
         t, _, _ = t_link
@@ -798,17 +804,13 @@ class ShortestPathCalculator:
             dist = self.shortest_path(s, t)
             self.stats.miss()
         return (
-            to_travel_time(
-                (s_length - s_offset) * units.meter, s_row.speed * units.mph
-            ).m_as(
-                TRAVEL_TIME_UNITS
-            )  # distance from s pt to end of s link
-            + dist  # path length from s->t
-            + to_travel_time(
-                t_offset * units.meter, t_row.speed * units.mph
-            ).m_as(
-                TRAVEL_TIME_UNITS
-            )  # distance from beginning of t link to t pt
+            _to_travel_minutes(
+                s_length - s_offset, s_row
+            )  # travel time from s pt to end of s link
+            + dist  # travel time from s->t
+            + _to_travel_minutes(
+                t_offset, t_row
+            )  # travel time from t node to t pt
         )
 
     def shortest_path(self, source, target=None) -> dict:
@@ -838,6 +840,14 @@ class ShortestPathCalculator:
     @staticmethod
     def _link_length(u, v, data):
         return min(attr[LINK_TRAVEL_TIME] for attr in data.values())
+
+
+def _to_travel_minutes(
+    distance_meters: float, neighborhood_row: pd.Series
+) -> float:
+    return to_travel_time(
+        distance_meters * units.meter, neighborhood_row[LINK_SPEED] * units.mph
+    ).m_as(TRAVEL_TIME_UNITS)
 
 
 class CacheStats:

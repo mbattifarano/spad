@@ -13,11 +13,10 @@ import pint
 from logging import getLogger
 
 from . import etl
-from .common import SPADError
+from .common import SPADError, units
 from .bounding_box import BoundingBox
 from .osm import MAXSPEED_MPH_PATTERN
 
-units = pint.UnitRegistry()
 log = getLogger(__name__)
 
 GPS_TABLE_NAME = "gps"

@@ -191,6 +191,15 @@ class TimeInterval(click.ParamType):
     ),
 )
 @click.option(
+    "--accuracy-scale",
+    type=float,
+    default=1.0,
+    help=(
+        "Scale the accuracy by this factor. Larger values will increase the "
+        "probability of matching a ping to further links."
+    ),
+)
+@click.option(
     "--limit", type=int, default=None, help="Number of segments to map-match."
 )
 @click.option(
@@ -205,6 +214,7 @@ def map_match(
     cache_path,
     start_with_driver,
     lazy_load_network,
+    accuracy_scale,
     transition_exp_scale,
     limit,
     commit_every,
@@ -224,6 +234,7 @@ def map_match(
             lazy_load_network=lazy_load_network,
             start_at_driver=start_with_driver,
             cache_path=cache_path,
+            accuracy_scale=accuracy_scale,
         )
     except:  # noqa: E722 do not use bare 'except'
         conn.rollback()
