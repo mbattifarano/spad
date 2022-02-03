@@ -28,3 +28,22 @@ To generate or update the API documentation run, ``sphinx-apidoc -o docs/source 
 .. _poetry: https://python-poetry.org/
 
 
+Database Setup
+==============
+
+The GPS processing and map-matching code requires an installation of postgres with
+the postgis extension enabled.
+
+To load the osmnx road network data into the database use `spad import-osmnx-network`
+
+To load the GPS traces into the database use `spad import-gps`
+
+Additionally, the PA municipalities shapefile will need to be loaded into the database.
+The data is availabe from the
+`Pennsylvania spatial data access webpage <https://www.pasda.psu.edu/uci/DataSummary.aspx?dataset=41>`_
+Once downloaded and decompressed the sql script `sql/import-pa-muni.sql` can be used to 
+load the data into a table.
+
+Finally, default speeds for each link in the network are computed and stored in the
+`osmnx_default_maxspeed` table which can be created by running the
+`sql/create-osmnx_default_maxspeed.sql` script.
