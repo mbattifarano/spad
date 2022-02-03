@@ -827,12 +827,12 @@ class ShortestPathCalculator:
             # _dijkstra_multisource terminates early when it finds the
             # target. When it doesn't, we are guaranteed to have
             # searched every node reachable from source so any node
-            # not in `dist` is unreachable from source.
-            for nid in self.g.nodes:
-                if nid not in dist:
-                    dist[nid] = np.inf
+            # not in `dist` is unreachable.
+            node_dist_items = ((v, dist.get(v, np.inf)) for v in self.g.nodes)
+        else:
+            node_dist_items = dist.items()
         with self.dist_pred_cache.db.write_batch() as batch:
-            for v, distance in dist.items():
+            for v, distance in node_dist_items:
                 predecessor = (
                     NULL_NODE
                     if (np.isinf(distance) or v == source)
@@ -841,7 +841,7 @@ class ShortestPathCalculator:
                 self.dist_pred_cache.put(
                     (source, v), (distance, predecessor), batch=batch
                 )
-        return dist[target]
+        return dist.get(target, np.inf)
 
     @staticmethod
     def _link_length(u, v, data):
