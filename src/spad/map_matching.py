@@ -18,7 +18,7 @@ import time
 import datetime as dt
 from typing import Union, Tuple, Iterable, List
 import uuid
-from pint import Quantity, UnitRegistry
+from pint import Quantity
 from tqdm import tqdm
 import plyvel
 
@@ -539,17 +539,48 @@ def link_neighborhood(
     links["link_geometry"] = links.geometry  # keep the geom around
     subnetwork_idx = nearby_link_idx(links, trajectory, subnetwork_buffer)
     subnet_links = links.iloc[subnetwork_idx]
+    neighborhood = _lasso_neighborhood(
+        trajectory, subnet_links, threshold, subnetwork_buffer
+    )
+    if neighborhood is None:
+        return None
+    neighborhood.set_geometry(trajectory.geometry, inplace=True)
+    neighborhood.set_index(list(links.index.names), inplace=True, append=True)
+    neighborhood["distance_to_link"] = neighborhood.distance(
+        neighborhood.link_geometry
+    )
+    neighborhood["offset"] = neighborhood.apply(
+        _offset_on_link(neighborhood.geometry.name), axis=1
+    )
+    return neighborhood.sort_index()
+
+
+def _lasso_neighborhood(
+    trajectory: gpd.GeoDataFrame,
+    links: gpd.GeoDataFrame,
+    threshold: float,
+    max_threshold: float,
+):
+    """Find links within threshold of each gps ping.
+
+    If there are no links within threshold, double the threshold and repeat
+    for those pings which could not be matched.
+
+    If threshold exceeds max_threshold return None.
+    """
+    neighborhoods = []
     while True:
         points = trajectory.set_geometry(
             buffered_geometry(trajectory, threshold)
         )
         neighborhood = gpd.sjoin(
             points,
-            subnet_links,
+            links,
             how="left",
             predicate="intersects",
         )
         failed_pings = neighborhood.osmid.isna()
+        neighborhoods.append(neighborhood.loc[~failed_pings])
         if failed_pings.any():
             failed_ping_ids = list(
                 neighborhood[failed_pings].index.get_level_values("id")
@@ -559,7 +590,8 @@ def link_neighborhood(
                 f"within {threshold} meters; re-trying with double the "
                 f"threshold. failed pings: {failed_ping_ids}."
             )
-            if threshold > subnetwork_buffer:
+            neighborhood = neighborhood.loc[failed_pings]
+            if threshold > max_threshold:
                 log.warning(
                     "The match distance threshold is larger than the "
                     "subnetwork buffer. This likely means the pings "
@@ -570,15 +602,7 @@ def link_neighborhood(
             threshold = threshold * 2
         else:
             break
-    neighborhood.set_geometry(trajectory.geometry, inplace=True)
-    neighborhood.set_index(list(links.index.names), inplace=True, append=True)
-    neighborhood["distance_to_link"] = neighborhood.distance(
-        neighborhood.link_geometry
-    )
-    neighborhood["offset"] = neighborhood.apply(
-        _offset_on_link(neighborhood.geometry.name), axis=1
-    )
-    return neighborhood
+    return pd.concat(neighborhoods), threshold
 
 
 BBOX_EXPAND = np.array([-1.0, -1.0, 1.0, 1.0])
@@ -692,6 +716,9 @@ def buffered_geometry(
 
 
 NULL_NODE = -1
+SP_CACHE_KEY_T = Tuple[int, int]
+SP_CACHE_VALUE_T = Tuple[float, int]
+SP_UNREACHABLE_VALUE = (np.inf, NULL_NODE)
 
 
 class ShortestPathCalculator:
@@ -797,12 +824,7 @@ class ShortestPathCalculator:
         s_length = s_row.link_geometry.length
         _, s, _ = s_link
         t, _, _ = t_link
-        try:
-            dist, _ = self.dist_pred_cache.get((s, t))
-            self.stats.hit()
-        except KeyError:
-            dist = self.shortest_path(s, t)
-            self.stats.miss()
+        dist = self.shortest_path_distance(s, t)
         return (
             _to_travel_minutes(
                 s_length - s_offset, s_row
@@ -813,6 +835,27 @@ class ShortestPathCalculator:
             )  # travel time from t node to t pt
         )
 
+    def shortest_path_distance(self, source, target):
+        """Consult the cache, then run shortest paths."""
+        try:
+            # consult the cache for the distance s->t
+            dist, _ = self.dist_pred_cache.get((source, target))
+            self.stats.hit()
+        except KeyError:
+            # the cache has no value for s->t; check if s has a default (inf)
+            # the special key (s, NULL_NODE) is used to indicate that the
+            # cache for source node s is complete: any missing key (s, t)
+            # means that t is unreachable from s.
+            try:
+                dist, _ = self.dist_pred_cache.get((source, NULL_NODE))
+                self.stats.hit()
+            except KeyError:
+                # the cache has no value for s->t and the cache is not
+                # complete for s; run shortest paths.
+                dist = self.shortest_path(source, target)
+                self.stats.miss()
+        return dist
+
     def shortest_path(self, source, target=None) -> dict:
         pred = {source: []}
         dist = _dijkstra_multisource(
@@ -822,15 +865,17 @@ class ShortestPathCalculator:
             weight=self._link_length,
             pred=pred,
         )
-        if target is not None and target not in dist:
+        node_dist_items = dist.items()
+        no_path = target is not None and target not in dist
+        if no_path:
             log.warning(f"No path found from {source} to {target}.")
-            # _dijkstra_multisource terminates early when it finds the
-            # target. When it doesn't, we are guaranteed to have
-            # searched every node reachable from source so any node
-            # not in `dist` is unreachable.
-            node_dist_items = ((v, dist.get(v, np.inf)) for v in self.g.nodes)
-        else:
-            node_dist_items = dist.items()
+            # Find all nodes that cannot reach the target
+            # When solving the HMM, shortest paths is called many times
+            # against the same target node. If the target is unreachable
+            # from one node it is likley unreachable from others. Find
+            # and cache them to prevent costly shortest path calls.
+            # TODO: test this does it save time?
+            extra_items = self._cannot_reach(target)
         with self.dist_pred_cache.db.write_batch() as batch:
             for v, distance in node_dist_items:
                 predecessor = (
@@ -841,11 +886,31 @@ class ShortestPathCalculator:
                 self.dist_pred_cache.put(
                     (source, v), (distance, predecessor), batch=batch
                 )
+            for key, val in extra_items:
+                self.dist_pred_cache.put(key, val, batch=batch)
+            if no_path:
+                self.dist_pred_cache.put(
+                    (source, NULL_NODE), SP_UNREACHABLE_VALUE
+                )
         return dist.get(target, np.inf)
 
     @staticmethod
     def _link_length(u, v, data):
         return min(attr[LINK_TRAVEL_TIME] for attr in data.values())
+
+    def _cannot_reach(
+        self, target
+    ) -> Iterable[Tuple[SP_CACHE_KEY_T, SP_CACHE_VALUE_T]]:
+        """Finds all nodes that cannot reach the target.
+
+        Returns an iterable of items to cache.
+        """
+        can_reach_target = set(
+            v for _, v in nx.traversal.bfs_edges(self.g, target, reverse=True)
+        )
+        for source in self.g.nodes:
+            if source not in can_reach_target:
+                yield (source, target), SP_UNREACHABLE_VALUE
 
 
 def _to_travel_minutes(

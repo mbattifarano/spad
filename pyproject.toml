@@ -29,6 +29,7 @@ Pint = "^0.18"
 pygeos = "0.10.2"
 plyvel = "^1.4.0"
 Pint-Pandas = "^0.2"
+pyarrow = "^7.0.0"
 
 [tool.poetry.dev-dependencies]
 pytest = "^5.2"

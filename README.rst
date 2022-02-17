@@ -38,6 +38,11 @@ To load the osmnx road network data into the database use `spad import-osmnx-net
 
 To load the GPS traces into the database use `spad import-gps`
 
+Raw open street maps data is used to extract nearby places. First download the 
+relevant osm xml data file (data.osm) then import it with:
+
+`osm2pgsql -c data.osm -p swpa --hstore --output-pgsql-schema osm`
+
 Additionally, the PA municipalities shapefile will need to be loaded into the database.
 The data is availabe from the
 `Pennsylvania spatial data access webpage <https://www.pasda.psu.edu/uci/DataSummary.aspx?dataset=41>`_
