@@ -6,4 +6,4 @@ images/
 docs/build/
 .coverage
 __pycache__/
-*.ldb
+*.ldb/

@@ -77,6 +77,7 @@ def map_match_trajectories(
     cache_path: str = None,
     start_at_driver: uuid.UUID = None,
     accuracy_scale: float = 1.0,
+    network_gpickle_file: str = None,
 ):
     t0 = time.time()
     run_uuid = uuid.uuid4()
@@ -84,13 +85,26 @@ def map_match_trajectories(
     if cache_path is None:
         cache_path = f"./{run_uuid}"
     db = plyvel.DB(cache_path, create_if_missing=True)
-    if not lazy_load_network:
-        log.info(f"Using entire OSM graph.")
+    if lazy_load_network:
+        log.warning(
+            "Lazy loading the network is no longer supported; ignoring."
+        )
+    log.info(f"Using entire OSM graph.")
+    try:
+        log.info("Attepmting to read network from disk.")
+        g = nx.read_gpickle(network_gpickle_file or "")
+    except FileNotFoundError:
+        log.info("Reading network from database.")
         g, links = get_osmnx_network(conn)
-        preserve_index_as_columns(links)
-        links.sindex  # initialize the index
-        spc = ShortestPathCalculator(g, allow_reverse=allow_reverse, lvldb=db)
-        log.info(f"Built osmnx graph (t={time.time()-t0}s)")
+        if network_gpickle_file is not None:
+            log.info(f"Writing osmnx graph to '{network_gpickle_file}'")
+            nx.write_gpickle(g, network_gpickle_file)
+    else:
+        links = ox.graph_to_gdfs(g, nodes=False, edges=True)
+    preserve_index_as_columns(links)
+    links.sindex  # initialize the index
+    spc = ShortestPathCalculator(g, allow_reverse=allow_reverse, lvldb=db)
+    log.info(f"Built osmnx graph (t={time.time()-t0}s)")
     register_uuid()
     with conn.cursor() as cursor:
         cursor.execute(
@@ -128,16 +142,6 @@ def map_match_trajectories(
             f"Segment {segment_uuid} has {len(segment)} pings starting with "
             f"ping {initial_ping_id}"
         )
-        if lazy_load_network:
-            t0 = time.time()
-            log.info(f"Building subnetwork graph.")
-            g, links = get_osmnx_subnetwork(conn, segment, subnetwork_buffer)
-            preserve_index_as_columns(links)
-            links.sindex  # initialize the index
-            spc = ShortestPathCalculator(
-                g, allow_reverse=allow_reverse, lvldb=db
-            )
-            log.info(f"Built subnetwork in {time.time()-t0}s.")
         max_accuracy = segment.accuracy.max()
         if max_accuracy > max_match_distance:
             log.warning(
@@ -447,9 +451,14 @@ class HMMEdgeWeight:
     def __call__(self, u, v, data) -> float:
         u_row = self._get_node_data(u)
         v_row = self._get_node_data(v)
-        return node_cost(v_row) + edge_cost(
+        w = node_cost(v_row) + edge_cost(
             self.spc, self.neighborhood.geometry.name, u_row, v_row, self.scale
         )
+        if not isinstance(w, float):
+            raise TypeError(
+                f"Edge weight should be a float, got {type(w)}: {w}"
+            )
+        return w
 
     def _get_node_data(self, u) -> Node:
         return u if is_terminal(u) else self.neighborhood.loc[u]
@@ -590,7 +599,7 @@ def _lasso_neighborhood(
                 f"within {threshold} meters; re-trying with double the "
                 f"threshold. failed pings: {failed_ping_ids}."
             )
-            neighborhood = neighborhood.loc[failed_pings]
+            trajectory = trajectory.loc[neighborhood.loc[failed_pings].index]
             if threshold > max_threshold:
                 log.warning(
                     "The match distance threshold is larger than the "
@@ -602,7 +611,7 @@ def _lasso_neighborhood(
             threshold = threshold * 2
         else:
             break
-    return pd.concat(neighborhoods), threshold
+    return pd.concat(neighborhoods)
 
 
 BBOX_EXPAND = np.array([-1.0, -1.0, 1.0, 1.0])
@@ -866,6 +875,7 @@ class ShortestPathCalculator:
             pred=pred,
         )
         node_dist_items = dist.items()
+        extra_items = []
         no_path = target is not None and target not in dist
         if no_path:
             log.warning(f"No path found from {source} to {target}.")

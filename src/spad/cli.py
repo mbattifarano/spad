@@ -205,6 +205,9 @@ class TimeInterval(click.ParamType):
 @click.option(
     "--commit-every", type=int, default=None, help="Commit interval."
 )
+@click.option(
+    "--network-gpickle", type=str, default=None, help="networkx road network cache."
+)
 def map_match(
     max_ping_time_delta,
     min_trajectory_duration,
@@ -218,6 +221,7 @@ def map_match(
     transition_exp_scale,
     limit,
     commit_every,
+    network_gpickle
 ):
     conn = pg.connect(db_uri)
     try:
@@ -235,6 +239,7 @@ def map_match(
             start_at_driver=start_with_driver,
             cache_path=cache_path,
             accuracy_scale=accuracy_scale,
+            network_gpickle_file=network_gpickle,
         )
     except:  # noqa: E722 do not use bare 'except'
         conn.rollback()
