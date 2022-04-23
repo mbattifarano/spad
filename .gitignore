@@ -6,3 +6,7 @@ images/
 docs/build/
 .coverage
 __pycache__/
+venv-spad/
+.env/
+.hypothesis/
+.ipynb_checkpoints/
