@@ -2,7 +2,7 @@
 from os import lockf
 import numpy as np
 import tensorflow as tf
-from tensosflow_probability import bijectors
+from tensorflow_probability import bijectors
 from tensorflow.keras.layers import Layer
 from scipy.sparse import coo_matrix
 from .sparse_utils import (
@@ -259,7 +259,7 @@ class SparseLinearLayer(Layer):
 
 
 def validate_demand_initializer(q_init: coo_matrix):
-    """Raise an Exception if q_init is maformed.
+    """Raise an Exception if q_init is malformed.
 
     Args:
         q_init (coo_matrix): The initial estimate of OD demand.
