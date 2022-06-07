@@ -5,11 +5,15 @@ import pint
 import psycopg2 as pg
 import datetime as dt
 import logging
+import pandas as pd
+import time
+
+from tqdm import tqdm
 from . import db
 from .common import SPADError
 from .bounding_box import BoundingBox
 from .map_matching import create_map_match_tables, map_match_trajectories
-
+from .stop_inference import ServiceStopInference, get_still_pings
 
 units = pint.UnitRegistry()
 
@@ -128,6 +132,17 @@ class TimeInterval(click.ParamType):
         return dt.timedelta(seconds=seconds)
 
 
+class QuantityType(click.ParamType):
+    name = "Quantity"
+
+    def convert(self, value, param, ctx):
+        try:
+            return units(value)
+        except pint.errors.PintError:
+            self.fail(f"{value!r} must be pint parsable (ex: '4 minutes')")
+            raise
+
+
 @spad.command()
 @click.option(
     "--max-ping-time-delta",
@@ -206,7 +221,10 @@ class TimeInterval(click.ParamType):
     "--commit-every", type=int, default=None, help="Commit interval."
 )
 @click.option(
-    "--network-gpickle", type=str, default=None, help="networkx road network cache."
+    "--network-gpickle",
+    type=str,
+    default=None,
+    help="networkx road network cache.",
 )
 def map_match(
     max_ping_time_delta,
@@ -221,7 +239,7 @@ def map_match(
     transition_exp_scale,
     limit,
     commit_every,
-    network_gpickle
+    network_gpickle,
 ):
     conn = pg.connect(db_uri)
     try:
@@ -248,6 +266,79 @@ def map_match(
         conn.commit()
     finally:
         conn.close()
+
+
+@spad.command()
+@click.option("--db-uri", default="postgresql://", help="Database URI.")
+@click.option(
+    "--mean-stop-speed",
+    type=QuantityType(),
+    default="5 mph",
+    help="Mean speed measurement when the vehicle is stopped.",
+)
+@click.option(
+    "--stop-radius",
+    type=QuantityType(),
+    default="10 meters",
+    help="Mean distance between points at a service stop.",
+)
+@click.option(
+    "--stop-timedelta",
+    type=QuantityType(),
+    default="1 minute",
+    help="Mean time interval between consecutive stop pings.",
+)
+@click.option(
+    "--pings-per-stop",
+    type=int,
+    default=5,
+    help="Mean number of pings associated with a stop.",
+)
+@click.option(
+    "--trip-travel-distance",
+    type=QuantityType(),
+    default="3 miles",
+    help="Mean trip travel distance.",
+)
+@click.option(
+    "--trip-travel-time",
+    type=QuantityType(),
+    default="15 minutes",
+    help="Mean trip travel time.",
+)
+@click.option("--outfile")
+def infer_stops(
+    db_uri: str,
+    mean_stop_speed: pint.Quantity,
+    stop_radius: pint.Quantity,
+    stop_timedelta: pint.Quantity,
+    pings_per_stop: int,
+    trip_travel_distance: pint.Quantity,
+    trip_travel_time: pint.Quantity,
+    outfile: str,
+):
+    """Cluster still GPS pings into stops."""
+    ssi = ServiceStopInference(
+        v=mean_stop_speed,
+        d=stop_radius,
+        t=stop_timedelta,
+        n_pings=pings_per_stop,
+        trip_travel_distance=trip_travel_distance,
+        trip_travel_time=trip_travel_time,
+    )
+    click.echo(f"Querying still GPS pings...")
+    t0 = time.time()
+    pings = get_still_pings(db_uri)
+    click.echo(f"Retrieved still GPS pings in {time.time()-t0} seconds.")
+    data = []
+    for _, g in tqdm(pings.groupby(["driver_id"])):
+        data.append(ssi.infer_stops(g))
+    inferred_stops = pd.concat(data)
+    if outfile:
+        fname = f"{outfile}.parquet"
+        click.echo(f"Saving results to {fname}.")
+        inferred_stops.to_parquet(fname)
+    click.echo("done")
 
 
 class CLIError(SPADError):
