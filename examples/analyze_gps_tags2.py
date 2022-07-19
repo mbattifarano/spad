@@ -68,10 +68,10 @@ async def get_many_ping_tags(
 ):
     async with aiopg.create_pool(maxsize=n_threads, timeout=None) as pool:
         ret = await tqdm_asyncio.gather(
-            *[get_ping_tags(pool, p) for p in params],
-            total=total
+            *[get_ping_tags(pool, p) for p in params], total=total
         )
         return ret
+
 
 QUERY_TIMEOUT = dt.timedelta(hours=1).total_seconds()
 
